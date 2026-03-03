@@ -1,0 +1,1 @@
+ imports (@mentraos/sdk, tfjs-node, dotenv), class CardCounterApp extends AppServer, onSession with transcription listener, scan logic (stub detectCards as return [] for now), helpers (getCardValue), and server instantiation at bottom.
