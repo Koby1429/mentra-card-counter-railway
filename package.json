@@ -1,0 +1,18 @@
+{
+  "name": "mentra-card-counter",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "@mentraos/sdk": "latest",
+    "@tensorflow/tfjs": "latest",
+    "@tensorflow/tfjs-node": "latest",
+    "dotenv": "latest"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  }
+}
