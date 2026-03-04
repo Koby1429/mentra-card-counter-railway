@@ -1,8 +1,9 @@
-import { AppServer, AppSession } from '@mentra/sdk';  // ← Fixed import
-import * as tf from '@tensorflow/tfjs-node';  // For future ML card detection (optional now)
+import { AppServer, AppSession } from '@mentra/sdk';
+import * as tf from '@tensorflow/tfjs-node'; // For future ML card detection
 import * as dotenv from 'dotenv';
+import http from 'http';
 
-dotenv.config();  // Loads .env variables like MENTRA_API_KEY (local only)
+dotenv.config(); // Loads .env variables like MENTRA_API_KEY (local only)
 
 class CardCounterApp extends AppServer {
   protected async onSession(
@@ -96,30 +97,26 @@ class CardCounterApp extends AppServer {
   }
 }
 
-// Start the server
+// Create the app instance
 const server = new CardCounterApp({
-  packageName: 'com.yakov.cardcounter',          // Must match EXACTLY what you registered in console.mentra.glass
-  apiKey: process.env.MENTRA_API_KEY!,           // ← Use this name (add to Railway Variables)
+  packageName: 'com.yakov.cardcounter',          // Must match EXACTLY what you registered
+  apiKey: process.env.MENTRA_API_KEY!,           // Fresh key from console
   port: Number(process.env.PORT) || 3000,        // Required for Railway
-  // publicDir: './public'                       // Optional if you add static files later
 });
 
-server.start()// ... (your existing imports and class definition stay the same)
-
-// Add this block here, before server.start()
-import http from 'http';
-
-const healthServer = http.createServer((req, res) => {
+// Health check server for Railway (prevents unhealthy/kill)
+http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('OK - Card Counter is alive');
-});
-
-healthServer.listen(Number(process.env.PORT) || 3000, () => {
+}).listen(Number(process.env.PORT) || 3000, () => {
   console.log(`Health check server listening on port ${process.env.PORT || 3000}`);
 });
 
-// Your existing server.start() goes right after this
-server.start().catch((err) => {
-  console.error('Server failed to start:', err);
+// Start the Mentra server with error logging
+try {
+  server.start();
+  console.log('Mentra AppServer started successfully');
+} catch (err) {
+  console.error('Mentra AppServer startup failed:', err.message || err);
   process.exit(1);
-});
+}
