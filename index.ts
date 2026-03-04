@@ -120,7 +120,6 @@ app.get('/', (req, res) => {
 });
 
 // Create the Mentra app (no port — uses default 7010)
-const server = new CardCounterApp({
   packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
 });
