@@ -104,9 +104,22 @@ const server = new CardCounterApp({
   // publicDir: './public'                       // Optional if you add static files later
 });
 
+server.start()// ... (your existing imports and class definition stay the same)
+
+// Add this block here, before server.start()
+import http from 'http';
+
+const healthServer = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('OK - Card Counter is alive');
+});
+
+healthServer.listen(Number(process.env.PORT) || 3000, () => {
+  console.log(`Health check server listening on port ${process.env.PORT || 3000}`);
+});
+
+// Your existing server.start() goes right after this
 server.start().catch((err) => {
   console.error('Server failed to start:', err);
   process.exit(1);
 });
-
-console.log(`Card Counter App Server running on port ${process.env.PORT || 3000}`);
