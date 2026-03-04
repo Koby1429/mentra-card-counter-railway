@@ -104,11 +104,10 @@ const server = new CardCounterApp({
   // Remove port line — Mentra will use 7010 internally
 });
 
-// Health check for Railway - always respond OK, with logging
+// Health check for Railway - respond OK on all paths to fix 502
 import http from 'http';
 
 http.createServer((req, res) => {
-  console.log('Incoming request on path:', req.url, 'from:', req.headers['user-agent']);
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('OK - Card Counter is alive and running!');
 }).listen(Number(process.env.PORT) || 3000, () => {
