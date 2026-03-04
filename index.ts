@@ -119,21 +119,33 @@ app.get('/', (req, res) => {
   res.status(200).send('OK - Card Counter is alive and running!');
 });
 
-// Health path /health for extra probes - respond OK
-app.get('/health', (req, res) => {
-  res.status(200).send('OK - Card Counter is alive and running!');
+// Create the Mentra app (no port — uses default 7010)
+const server = new CardCounterApp({
+  packageName: 'com.yakov.cardcounter',
+  apiKey: process.env.MENTRA_API_KEY!,
 });
 
-// Webhook path for MentraOS - if needed (Mentra sends to /webhook)
-app.post('/webhook', (req, res) => {
-  res.status(200).send('Webhook received');
-  // Mentra SDK handles this internally, but this ensures response
+// Health check server - listen on '0.0.0.0' to fix proxy issues
+import http from 'http';
+
+const healthServer = http.createServer((req, res) => {
+  console.log(`Probe received on path: ${req.url}`);
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('OK - Card Counter is alive and running!');
 });
 
-// Listen on Railway $PORT
-app.listen(Number(process.env.PORT) || 3000, () => {
-  console.log(`Express server listening on port ${process.env.PORT || 3000}`);
+healthServer.listen(Number(process.env.PORT) || 3000, '0.0.0.0', () => {
+  console.log(`Health check listening on 0.0.0.0:${process.env.PORT || 3000}`);
 });
+
+// Start Mentra SDK
+try {
+  server.start();
+  console.log('Mentra AppServer started successfully (default port 7010)');
+} catch (err) {
+  console.error('Mentra startup failed:', err.message || err);
+  process.exit(1);
+}
 
 // Start Mentra SDK server with error handling
 try {
