@@ -1,8 +1,8 @@
-import { AppServer, AppSession } from '@mentraos/sdk';
+import { AppServer, AppSession } from '@mentra/sdk';  // ← Fixed import
 import * as tf from '@tensorflow/tfjs-node';  // For future ML card detection (optional now)
 import * as dotenv from 'dotenv';
 
-dotenv.config();  // Loads .env variables like MENTRAOS_API_KEY
+dotenv.config();  // Loads .env variables like MENTRA_API_KEY (local only)
 
 class CardCounterApp extends AppServer {
   protected async onSession(
@@ -98,10 +98,15 @@ class CardCounterApp extends AppServer {
 
 // Start the server
 const server = new CardCounterApp({
-  packageName: 'com.yakov.cardcounter',          // Unique identifier for your app
-  apiKey: process.env.MENTRAOS_API_KEY!,         // From Railway variables / .env
-  port: Number(process.env.PORT) || 3000,        // Default to 3000 if not set
+  packageName: 'com.yakov.cardcounter',          // Must match EXACTLY what you registered in console.mentra.glass
+  apiKey: process.env.MENTRA_API_KEY!,           // ← Use this name (add to Railway Variables)
+  port: Number(process.env.PORT) || 3000,        // Required for Railway
   // publicDir: './public'                       // Optional if you add static files later
+});
+
+server.start().catch((err) => {
+  console.error('Server failed to start:', err);
+  process.exit(1);
 });
 
 console.log(`Card Counter App Server running on port ${process.env.PORT || 3000}`);
