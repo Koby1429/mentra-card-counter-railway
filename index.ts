@@ -104,12 +104,15 @@ const server = new CardCounterApp({
   // Remove port line — Mentra will use 7010 internally
 });
 
-// Health check for Railway (must use $PORT)
+// Simple health check — responds OK to EVERY request (including root /)
+// This fixes "Application failed to respond" / 502 Bad Gateway
+import http from 'http';
+
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('OK - Card Counter is alive');
+  res.end('OK - Card Counter is alive and running!');
 }).listen(Number(process.env.PORT) || 3000, () => {
-  console.log(`Health check listening on port ${process.env.PORT || 3000}`);
+  console.log(`Health check server listening on port ${process.env.PORT || 3000}`);
 });
 
 // Start Mentra with better error logging
