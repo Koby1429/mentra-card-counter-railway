@@ -7,7 +7,7 @@
     "start": "bun index.ts"
   },
   "dependencies": {
-    "@mentraos/sdk": "latest",
+    "@mentra/sdk": "latest",
     "@tensorflow/tfjs": "latest",
     "@tensorflow/tfjs-node": "latest",
     "dotenv": "latest"
