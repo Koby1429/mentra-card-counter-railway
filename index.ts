@@ -97,26 +97,26 @@ class CardCounterApp extends AppServer {
   }
 }
 
-// Create the app instance
+// Create the Mentra app (no port here — uses default 7010 for WebSocket)
 const server = new CardCounterApp({
-  packageName: 'com.yakov.cardcounter',          // Confirmed match from store
-  apiKey: process.env.MENTRA_API_KEY!,           // Fresh key from console
-  // NO port here — let Mentra use default 7010 for WebSocket
+  packageName: 'com.yakov.cardcounter',
+  apiKey: process.env.MENTRA_API_KEY!,
+  // Remove port line — Mentra will use 7010 internally
 });
 
-// Health check for Railway (HTTP on $PORT)
+// Health check for Railway (must use $PORT)
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('OK - Card Counter is alive');
 }).listen(Number(process.env.PORT) || 3000, () => {
-  console.log(`Health check server listening on port ${process.env.PORT || 3000}`);
+  console.log(`Health check listening on port ${process.env.PORT || 3000}`);
 });
 
-// Start Mentra SDK server with error handling
+// Start Mentra with better error logging
 try {
   server.start();
-  console.log('Mentra AppServer started successfully on default port 7010');
+  console.log('Mentra AppServer started successfully (default port 7010)');
 } catch (err) {
-  console.error('Mentra AppServer startup failed:', err.message || err);
+  console.error('Mentra startup failed:', err.message || err);
   process.exit(1);
 }
