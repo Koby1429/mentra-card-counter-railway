@@ -104,7 +104,7 @@ const server = new CardCounterApp({
   // Remove port line — Mentra will use 7010 internally
 });
 
-// Health check for Railway - respond OK on all paths to fix 502
+// New health check - add this (responds OK on all paths to fix 502)
 import http from 'http';
 
 http.createServer((req, res) => {
@@ -114,7 +114,6 @@ http.createServer((req, res) => {
   console.log(`Health check server listening on port ${process.env.PORT || 3000}`);
 });
 
-// Start Mentra with better error logging
 try {
   server.start();
   console.log('Mentra AppServer started successfully (default port 7010)');
@@ -122,3 +121,4 @@ try {
   console.error('Mentra startup failed:', err.message || err);
   process.exit(1);
 }
+
