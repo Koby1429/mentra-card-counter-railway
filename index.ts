@@ -104,8 +104,7 @@ const server = new CardCounterApp({
   // Remove port line — Mentra will use 7010 internally
 });
 
-// Simple health check — responds OK to EVERY request (including root /)
-// This fixes "Application failed to respond" / 502 Bad Gateway
+// Health check for Railway - respond OK on any path (fixes 502 / failed response)
 import http from 'http';
 
 http.createServer((req, res) => {
