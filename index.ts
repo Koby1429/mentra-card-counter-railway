@@ -2,7 +2,7 @@ import { AppServer, AppSession } from '@mentra/sdk';
 import * as tf from '@tensorflow/tfjs-node'; // For future ML card detection
 import * as dotenv from 'dotenv';
 import express from 'express'; // For custom routes
-import axios from 'axios'; // Added for Roboflow API calls
+import axios from 'axios'; // For Roboflow API
 
 dotenv.config(); // Loads .env variables like MENTRA_API_KEY and ROBOFLOW_API_KEY
 
@@ -10,7 +10,7 @@ class CardCounterApp extends AppServer {
   constructor(options: any) {
     super(options);
 
-    // Get the Express app instance
+    // Get Express app instance
     const app = this.getExpressApp();
 
     // Health check route for Railway
@@ -94,6 +94,9 @@ class CardCounterApp extends AppServer {
       }
     });
 
+    // Optional: Add more event handlers later, e.g., button presses
+    // session.events.onButtonPress((data) => { ... });
+
     // Cleanup streaming on session end
     this.addCleanupHandler(() => {
       if (streamingInterval) clearInterval(streamingInterval);
@@ -108,7 +111,7 @@ class CardCounterApp extends AppServer {
     try {
       // Request photo from glasses camera
       const photo = await session.camera.requestPhoto();
-      const imageBase64 = photo.photoData; // Assuming photoData is base64-encoded
+      const imageBase64 = photo.photoData; // Assuming photoData is base64
 
       // Detect cards using Roboflow
       const detectedCards = await this.detectCards(imageBase64);
@@ -120,7 +123,7 @@ class CardCounterApp extends AppServer {
 
       // Update Hi-Lo running count
       for (const card of detectedCards) {
-        const rank = card.class.charAt(0); // e.g., '2' from '2H' - adjust based on model's class format
+        const rank = card.class.charAt(0); // e.g., '2' from '2H' - adjust if model format differs
         const value = this.getCardValue(rank);
         state.runningCount += value;
         state.cardsSeen++;
@@ -150,19 +153,16 @@ class CardCounterApp extends AppServer {
   // Detect cards using Roboflow Inference API
   private async detectCards(imageBase64: string): Promise<{ class: string; confidence: number }[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakov-cards/1'; // Your forked model ID/version
+    const modelId = 'yakov-cards/1'; // Updated to lowercase as per your Roboflow ID
 
     try {
       const response = await axios.post(
         `https://detect.roboflow.com/${modelId}?api_key=${apiKey}`,
         imageBase64,
-        {
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-        }
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
       );
       console.log('Roboflow predictions:', response.data.predictions);
-
-      // Filter high-confidence detections (adjust threshold if needed)
+      // Filter high-confidence detections
       return response.data.predictions.filter((pred: any) => pred.confidence > 0.5);
     } catch (error) {
       console.error('Roboflow API error:', error);
@@ -184,13 +184,18 @@ const server = new CardCounterApp({
   packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
   port: port,
-  host: '0.0.0.0' // Bind to all interfaces for cloud access
+  host: '0.0.0.0' // Bind to all interfaces for cloud access - fixes 502
 });
 
-// Start server
+// Start server with backup Express listen
 server.start()
   .then(() => {
     console.log(`Mentra AppServer started successfully on port ${port}`);
+    // Backup: Force Express to listen externally if SDK doesn't
+    const app = server.getExpressApp();
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`Express backup listening on 0.0.0.0:${port} for external access`);
+    });
   })
   .catch((err) => {
     console.error('Mentra startup failed:', err.message || err);
