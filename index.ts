@@ -1,11 +1,21 @@
 import { AppServer, AppSession } from '@mentra/sdk';
 import * as tf from '@tensorflow/tfjs-node'; // For future ML card detection
 import * as dotenv from 'dotenv';
-import http from 'http';
+import express from 'express'; // Added for webview/health routes
 
 dotenv.config(); // Loads .env variables like MENTRA_API_KEY (local only)
 
 class CardCounterApp extends AppServer {
+  constructor(options: any) {
+    super(options);
+
+    // Set up Express routes for health check (required for Railway)
+    const app = this.getExpressApp(); // Assuming AppServer exposes Express app
+    app.get('/health', (req, res) => {
+      res.status(200).send('OK - Card Counter is alive and running!');
+    });
+  }
+
   protected async onSession(
     session: AppSession,
     sessionId: string,
@@ -97,25 +107,20 @@ class CardCounterApp extends AppServer {
   }
 }
 
-// Create the Mentra app (no port — uses default 3000 for WebSocket)
+// Create the Mentra app, passing dynamic port for Railway
+const port = Number(process.env.PORT) || 3000;
 const server = new CardCounterApp({
   packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
-});
-
-// Health check for Railway - respond OK on any path (fixes 502 / failed response)
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('OK - Card Counter is alive and running!');
-}).listen(Number(process.env.PORT) || 3000, () => {
-  console.log(`Health check server listening on port ${process.env.PORT || 3000}`);
+  port: port, // Use Railway's PORT
 });
 
 // Start Mentra SDK server with error handling
-try {
-  server.start();
-  console.log('Mentra AppServer started successfully (default port 3000)');
-} catch (err) {
-  console.error('Mentra startup failed:', err.message || err);
-  process.exit(1);
-}
+server.start()
+  .then(() => {
+    console.log(`Mentra AppServer started successfully on port ${port}`);
+  })
+  .catch((err) => {
+    console.error('Mentra startup failed:', err.message || err);
+    process.exit(1);
+  });
