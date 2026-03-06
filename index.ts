@@ -1,7 +1,7 @@
 import { AppServer, AppSession } from '@mentra/sdk';
 import * as tf from '@tensorflow/tfjs-node'; // For future ML card detection
 import * as dotenv from 'dotenv';
-import express from 'express'; // Added for webview/health routes
+import express from 'express'; // Added for custom routes like /health and /webhook
 
 dotenv.config(); // Loads .env variables like MENTRA_API_KEY (local only)
 
@@ -9,10 +9,19 @@ class CardCounterApp extends AppServer {
   constructor(options: any) {
     super(options);
 
-    // Set up Express routes for health check (required for Railway)
-    const app = this.getExpressApp(); // Assuming AppServer exposes Express app
+    // Get the Express app instance (assuming AppServer exposes it; if not, adjust based on SDK docs)
+    const app = this.getExpressApp();
+
+    // Add health check route for Railway
     app.get('/health', (req, res) => {
       res.status(200).send('OK - Card Counter is alive and running!');
+    });
+
+    // Add webhook route to handle MentraOS callbacks (fixes 502 on /webhook)
+    app.post('/webhook', (req, res) => {
+      console.log('Webhook received:', req.body); // Log for debugging
+      // Process any Mentra events here if needed
+      res.status(200).send('OK');
     });
   }
 
@@ -107,12 +116,13 @@ class CardCounterApp extends AppServer {
   }
 }
 
-// Create the Mentra app, passing dynamic port for Railway
-const port = Number(process.env.PORT) || 3000;
+// Create the Mentra app with dynamic port and host for Railway
+const port = Number(process.env.PORT) || 7010; // Use 7010 as fallback based on logs
 const server = new CardCounterApp({
   packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
-  port: port, // Use Railway's PORT
+  port: port,
+  host: '0.0.0.0', // Listen on all interfaces for cloud accessibility
 });
 
 // Start Mentra SDK server with error handling
