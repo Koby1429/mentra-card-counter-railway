@@ -133,7 +133,7 @@ class CardCounterApp extends AppServer {
   // Detect cards via Roboflow API
   private async detectCards(imageBase64: string): Promise<{ class: string; confidence: number }[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'playing-cards-yy60t/1'; // Your forked ID/version (update after forking)
+    const modelId = 'yakov-cards/1'; // Your forked ID/version (update after forking)
 
     try {
       const response = await axios.post(
