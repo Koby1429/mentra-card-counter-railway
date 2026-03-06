@@ -97,7 +97,7 @@ class CardCounterApp extends AppServer {
   }
 }
 
-// Create the Mentra app (no port — uses default 7010 for WebSocket)
+// Create the Mentra app (no port — uses default 3000 for WebSocket)
 const server = new CardCounterApp({
   packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
@@ -114,7 +114,7 @@ http.createServer((req, res) => {
 // Start Mentra SDK server with error handling
 try {
   server.start();
-  console.log('Mentra AppServer started successfully (default port 7010)');
+  console.log('Mentra AppServer started successfully (default port 3000)');
 } catch (err) {
   console.error('Mentra startup failed:', err.message || err);
   process.exit(1);
