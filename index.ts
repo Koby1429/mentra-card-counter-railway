@@ -153,7 +153,7 @@ class CardCounterApp extends AppServer {
   // Detect cards using Roboflow Inference API
   private async detectCards(imageBase64: string): Promise<{ class: string; confidence: number }[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakov-cards/1'; // Updated to lowercase as per your Roboflow ID
+    const modelId = 'yakov-cards/1'; // Your forked model (lowercase per note)
 
     try {
       const response = await axios.post(
@@ -179,23 +179,18 @@ class CardCounterApp extends AppServer {
 }
 
 // Create the Mentra app with dynamic port and host
-const port = Number(process.env.PORT) || 7010; // Match SDK default from logs
+const port = Number(process.env.PORT) || 8080; // Update to 8080 per latest logs
 const server = new CardCounterApp({
   packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
   port: port,
-  host: '0.0.0.0' // Bind to all interfaces for cloud access - fixes 502
+  host: '0.0.0.0' // Bind to all interfaces for cloud access
 });
 
-// Start server with backup Express listen
+// Start server (removed backup listen to avoid conflict)
 server.start()
   .then(() => {
     console.log(`Mentra AppServer started successfully on port ${port}`);
-    // Backup: Force Express to listen externally if SDK doesn't
-    const app = server.getExpressApp();
-    app.listen(port, '0.0.0.0', () => {
-      console.log(`Express backup listening on 0.0.0.0:${port} for external access`);
-    });
   })
   .catch((err) => {
     console.error('Mentra startup failed:', err.message || err);
