@@ -150,7 +150,7 @@ class CardCounterApp extends AppServer {
   // Detect cards using Roboflow Inference API
   private async detectCards(imageBase64: string): Promise<{ class: string; confidence: number }[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'YAKOV-cards/1'; // Your forked model ID/version
+    const modelId = 'yakov-cards/1'; // Your forked model ID/version
 
     try {
       const response = await axios.post(
