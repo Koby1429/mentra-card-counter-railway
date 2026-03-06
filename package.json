@@ -6,13 +6,7 @@
   "scripts": {
     "start": "bun index.ts"
   },
-  "dependencies": {
-    "@mentra/sdk": "latest",
-    "@tensorflow/tfjs": "latest",
-    "@tensorflow/tfjs-node": "latest",
-    "dotenv": "latest"
-  },
-  "devDependencies": {
-    "bun-types": "latest"
-  }
-}
+ "dependencies": {
+  // ... your existing deps like "@mentra/sdk", "@tensorflow/tfjs-node", "dotenv", "express"
+  "@roboflow/inference-sdk": "^0.0.1" // Or latest version; run npm install to get it
+} 
