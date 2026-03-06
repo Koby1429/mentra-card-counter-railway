@@ -123,7 +123,8 @@ class CardCounterApp extends AppServer {
 
       // Update Hi-Lo running count
       for (const card of detectedCards) {
-        const rank = card.class.charAt(0); // e.g., '2' from '2H' - adjust if model format differs
+        const label = card.class; // e.g., '10H', '2S', 'JH'
+        const rank = label.slice(0, -1); // '10', '2', 'J' (removes suit)
         const value = this.getCardValue(rank);
         state.runningCount += value;
         state.cardsSeen++;
@@ -150,19 +151,26 @@ class CardCounterApp extends AppServer {
     }
   }
 
-  // Detect cards using Roboflow Inference API
+  // Detect cards using Roboflow Serverless Inference API (V2)
   private async detectCards(imageBase64: string): Promise<{ class: string; confidence: number }[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakov-cards/1'; // Your forked model
+    const modelId = 'playing-cards-ow27d-sefl4/1'; // Updated to the provided ID
 
     try {
-      const response = await axios.post(
-        `https://detect.roboflow.com/${modelId}?api_key=${apiKey}`,
-        imageBase64,
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-      );
+      const url = `https://serverless.roboflow.com/${modelId}`;
+      const data = {
+        image: `data:image/jpeg;base64,${imageBase64}`, // Add data URI prefix; change 'jpeg' if needed
+        image_type: 'base64',
+      };
+
+      const response = await axios.post(url, data, {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
       console.log('Roboflow predictions:', response.data.predictions);
-      // Filter high-confidence detections
       return response.data.predictions.filter((pred: any) => pred.confidence > 0.5);
     } catch (error) {
       console.error('Roboflow API error:', error);
