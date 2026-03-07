@@ -129,34 +129,38 @@ class CardCounterApp extends AppServer {
       // Detect cards using Roboflow
       const detectedCards = await this.detectCards(imageBase64);
 
+      let announcement = '';
+
       if (detectedCards.length === 0) {
-        await session.audio.speak('No cards detected.');
-        return null;
-      }
-
-      // Update Hi-Lo running count
-      for (const card of detectedCards) {
-        const label = card.class; // e.g., '10H', '2S', 'JH'
-        const rank = label.slice(0, -1); // '10', '2', 'J' (removes suit)
-        const value = this.getCardValue(rank);
-        state.runningCount += value;
-        state.cardsSeen++;
-        if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) {
-          state.highSeen++;
+        // Announce no change even if no cards detected (for consistency in streaming)
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        announcement = `No cards detected. Current true count remains ${trueCount}.`;
+      } else {
+        // Update Hi-Lo running count
+        for (const card of detectedCards) {
+          const label = card.class; // e.g., '10H', '2S', 'JH'
+          const rank = label.slice(0, -1); // '10', '2', 'J' (removes suit)
+          const value = this.getCardValue(rank);
+          state.runningCount += value;
+          state.cardsSeen++;
+          if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) {
+            state.highSeen++;
+          }
         }
-      }
 
-      // Calculate true count and high cards left
-      const decksLeft = state.decks - (state.cardsSeen / 52);
-      const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
-      const highLeft = state.totalHigh - state.highSeen;
+        // Calculate true count and high cards left
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        const highLeft = state.totalHigh - state.highSeen;
+
+        announcement = `Detected ${detectedCards.length} cards. Running count is ${state.runningCount}. True count is ${trueCount}. High cards left: ${highLeft}.`;
+      }
 
       // Announce results privately
-      await session.audio.speak(
-        `Detected ${detectedCards.length} cards. True count is ${trueCount}. High cards left: ${highLeft}.`
-      );
+      await session.audio.speak(announcement);
 
-      return { runningCount: state.runningCount, cardsSeen: state.cardsSeen, highSeen: state.highSeen };
+      return detectedCards.length > 0 ? { runningCount: state.runningCount, cardsSeen: state.cardsSeen, highSeen: state.highSeen } : null;
     } catch (error) {
       console.error('Scan error:', error);
       await session.audio.speak('Error detecting cards. Try again.');
