@@ -1,5 +1,4 @@
 import { AppServer, AppSession } from '@mentra/sdk';
-import * as tf from '@tensorflow/tfjs-node'; // For future ML card detection
 import * as dotenv from 'dotenv';
 import express from 'express'; // For custom routes
 import axios from 'axios'; // For Roboflow API
@@ -165,25 +164,33 @@ class CardCounterApp extends AppServer {
       }
       await session.audio.speak(announcement);
       console.log('Announced');
-    } catch (error) {
-      console.error('Scan fail:', error.message);
+    } catch (error: any) {
+      console.error('Scan fail:', error.message || error);
       await session.audio.speak('Scan error. Retry.');
     }
   }
 
+  // FIXED: Uses correct endpoint and authentication pattern!
   private async detectCards(imageBase64: string): Promise<any[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakov-cards/1'; // Updated to your new project
+    const modelId = 'yakov-cards/1'; // Your model
 
     try {
-      const response = await axios.post(`https://serverless.roboflow.com/${modelId}`, {
-        image: `data:image/jpeg;base64,${imageBase64}`,
-        image_type: 'base64'
-      }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } });
-      console.log('Roboflow:', response.data.predictions);
-      return response.data.predictions.filter((p: any) => p.confidence > 0.5);
-    } catch (error) {
-      console.error('Roboflow fail:', error);
+      const url = `https://detect.roboflow.com/${modelId}?api_key=${apiKey}`;
+      const response = await axios.post(
+        url,
+        {
+          image: `data:image/jpeg;base64,${imageBase64}`,
+        },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+      return (response.data.predictions || []).filter((p: any) => p.confidence > 0.5);
+    } catch (error: any) {
+      if (error.response) {
+        console.error('Roboflow fail:', error.response.data);
+      } else {
+        console.error('Roboflow fail:', error.message);
+      }
       return [];
     }
   }
