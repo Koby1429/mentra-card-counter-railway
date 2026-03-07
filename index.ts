@@ -1,11 +1,15 @@
 import { AppServer, AppSession } from '@mentra/sdk';
+import * as tf from '@tensorflow/tfjs-node'; // For future ML card detection
 import * as dotenv from 'dotenv';
-import express from 'express';
-import axios from 'axios';
+import express from 'express'; // For custom routes
+import axios from 'axios'; // For Roboflow API
 
-dotenv.config();
+dotenv.config(); // Loads .env variables like MENTRA_API_KEY and ROBOFLOW_API_KEY
 
+// Global store for session states
 const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
+
+// Transcription handlers (global for actions)
 const transcriptionHandlers = new Map<string, (data: any) => void>();
 
 class CardCounterApp extends AppServer {
@@ -16,6 +20,12 @@ class CardCounterApp extends AppServer {
 
     app.get('/health', (req, res) => res.status(200).send('OK - Card Counter running!'));
 
+    app.post('/webhook', (req, res) => {
+      console.log('Webhook:', req.body);
+      res.status(200).send('OK');
+    });
+
+    // Dashboard webview
     app.get('/webview', (req, res) => {
       res.status(200).send(`
         <html>
@@ -52,6 +62,7 @@ class CardCounterApp extends AppServer {
       `);
     });
 
+    // Stats API (assumes one session for demo; add sessionId param for multi)
     app.get('/stats', (req, res) => {
       const state = Array.from(sessionStates.values())[0] || { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 };
       const decksLeft = state.decks - (state.cardsSeen / 52);
@@ -60,9 +71,11 @@ class CardCounterApp extends AppServer {
       res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
     });
 
+    // Action API
     app.post('/action', express.json(), (req, res) => {
       const { command } = req.body;
-      console.log(`[ACTION] Triggered: ${command}`);
+      console.log(`Action triggered: ${command}`);
+      // Simulate transcription for first active session
       const handler = Array.from(transcriptionHandlers.values())[0];
       if (handler) handler({ text: command });
       res.status(200).send('OK');
@@ -79,7 +92,7 @@ class CardCounterApp extends AppServer {
 
     const onTrans = async (data: any) => {
       const text = data.text.toLowerCase().trim();
-      console.log(`[TRANSCRIPTION] User said: "${text}"`);
+      console.log(`[TRANS] Received: ${text} (full data: ${JSON.stringify(data)})`);
 
       if (text.includes('scan cards')) await this.performScan(session, sessionStates.get(sessionId)!);
       else if (text.includes('start streaming')) {
@@ -102,6 +115,8 @@ class CardCounterApp extends AppServer {
         const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
         const highLeft = state.totalHigh - state.highSeen;
         await session.audio.speak(`True: ${trueCount}. High: ${highLeft}.`);
+      } else {
+        console.log(`[TRANS] Unrecognized command: ${text}`);
       }
     };
 
@@ -112,117 +127,109 @@ class CardCounterApp extends AppServer {
       if (streamingInterval) clearInterval(streamingInterval);
       sessionStates.delete(sessionId);
       transcriptionHandlers.delete(sessionId);
+      console.log(`[SESSION] Cleanup: ${sessionId}`);
     });
   }
 
   private async performScan(session: AppSession, state: any): Promise<void> {
-  try {
-    console.log('[SCAN] Starting scan...');
-    const photoPromise = session.camera.requestPhoto();
-    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
-    const photo = await Promise.race([photoPromise, timeoutPromise]);
+    try {
+      console.log('[SCAN] Starting scan...');
+      const photoPromise = session.camera.requestPhoto();
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
+      const photo = await Promise.race([photoPromise, timeoutPromise]);
 
-    console.log('[SCAN] Full photo object:', photo);
-    if (photo && typeof photo === "object") {
-      console.log('[SCAN] All photo keys:', Object.keys(photo));
-      for (const key in photo) {
-        if (Object.prototype.hasOwnProperty.call(photo, key)) {
-          console.log(`[SCAN] Key: ${key} typeof:`, typeof photo[key]);
+      console.log('[SCAN] Full photo object:', photo);
+      if (photo && typeof photo === "object") {
+        console.log('[SCAN] All photo keys:', Object.keys(photo));
+        for (const key in photo) {
+          if (Object.prototype.hasOwnProperty.call(photo, key)) {
+            console.log(`[SCAN] Key: ${key} typeof:`, typeof photo[key]);
+          }
         }
       }
-    }
 
-    // Try common keys that might contain the raw photo bits:
-    const candidateKeys = ['photoData', 'data', 'buffer', 'bytes'];
-    let rawData: any = null;
-    for (const k of candidateKeys) {
-      if (photo[k]) {
-        rawData = photo[k];
-        console.log(`[SCAN] Using photo.${k} as image data. typeof:`, typeof rawData, 'length:', rawData?.length || rawData?.byteLength);
-        break;
+      // Try common keys that might contain the raw photo bits:
+      const candidateKeys = ['photoData', 'data', 'buffer', 'bytes'];
+      let rawData: any = null;
+      for (const k of candidateKeys) {
+        if (photo[k]) {
+          rawData = photo[k];
+          console.log(`[SCAN] Using photo.${k} as image data. typeof:`, typeof rawData, 'length:', rawData?.length || rawData?.byteLength);
+          break;
+        }
       }
-    }
 
-    let imageBase64: string | null = null;
+      let imageBase64: string | null = null;
 
-    if (rawData) {
-      // If rawData is a Buffer, ArrayBuffer, or Uint8Array
-      if (Buffer.isBuffer(rawData) || rawData instanceof Uint8Array || rawData instanceof ArrayBuffer) {
-        const imageBuffer = Buffer.from(rawData);
-        imageBase64 = imageBuffer.toString('base64');
-        console.log(`[SCAN] Encoded base64 from photo, length: ${imageBase64.length}`);
-      } else if (typeof rawData === "string") {
-        // Sometimes, it's already a base64 string
-        imageBase64 = rawData.replace(/^data:image\/jpeg;base64,/, "");
-        console.log('[SCAN] Raw image data is a string, using as base64 (first 50 chars):', imageBase64.slice(0,50));
+      if (rawData) {
+        // If rawData is a Buffer, ArrayBuffer, or Uint8Array
+        if (Buffer.isBuffer(rawData) || rawData instanceof Uint8Array || rawData instanceof ArrayBuffer) {
+          const imageBuffer = Buffer.from(rawData);
+          imageBase64 = imageBuffer.toString('base64');
+          console.log(`[SCAN] Encoded base64 from photo, length: ${imageBase64.length}`);
+        } else if (typeof rawData === "string") {
+          // Sometimes, it's already a base64 string
+          imageBase64 = rawData.replace(/^data:image\/jpeg;base64,/, "");
+          console.log('[SCAN] Raw image data is a string, using as base64 (first 50 chars):', imageBase64.slice(0,50));
+        } else {
+          throw new Error("Camera photo binary data is in an unrecognized format!");
+        }
+      } else if (photo.base64) {
+        console.log("[SCAN] Found base64 property on photo, using as is.");
+        imageBase64 = photo.base64.replace(/^data:image\/jpeg;base64,/, "");
+      }
+
+      if (!imageBase64) {
+        throw new Error("Camera photo has no usable binary/image data!");
+      }
+
+      const detectedCards = await this.detectCards(imageBase64);
+      console.log(`[SCAN] Detected cards: ${detectedCards ? detectedCards.length : 0}`);
+
+      let announcement = '';
+      if (!detectedCards || detectedCards.length === 0) {
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        announcement = `No cards. True: ${trueCount}.`;
       } else {
-        throw new Error("Camera photo binary data is in an unrecognized format!");
+        for (const card of detectedCards) {
+          const rank = card.class.slice(0, -1);
+          const value = this.getCardValue(rank);
+          state.runningCount += value;
+          state.cardsSeen++;
+          if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) state.highSeen++;
+        }
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        const highLeft = state.totalHigh - state.highSeen;
+        announcement = `Detected ${detectedCards.length}. Running: ${state.runningCount}. True: ${trueCount}. High: ${highLeft}.`;
       }
-    } else if (photo.base64) {
-      console.log("[SCAN] Found base64 property on photo, using as is.");
-      imageBase64 = photo.base64.replace(/^data:image\/jpeg;base64,/, "");
-    }
+      await session.audio.speak(announcement);
+      console.log('[SCAN] Announcement:', announcement);
 
-    if (!imageBase64) {
-      throw new Error("Camera photo has no usable binary/image data!");
-    }
-
-    const detectedCards = await this.detectCards(imageBase64);
-    console.log(`[SCAN] Detected cards: ${detectedCards ? detectedCards.length : 0}`);
-
-    let announcement = '';
-    if (!detectedCards || detectedCards.length === 0) {
-      const decksLeft = state.decks - (state.cardsSeen / 52);
-      const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
-      announcement = `No cards. True: ${trueCount}.`;
-    } else {
-      for (const card of detectedCards) {
-        const rank = card.class.slice(0, -1);
-        const value = this.getCardValue(rank);
-        state.runningCount += value;
-        state.cardsSeen++;
-        if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) state.highSeen++;
+    } catch (error: any) {
+      if (error && error.response && error.response.data) {
+        console.error('[SCAN] Error (Roboflow API response):', JSON.stringify(error.response.data));
+      } else {
+        console.error('[SCAN] Error:', error.stack || error.message || error);
       }
-      const decksLeft = state.decks - (state.cardsSeen / 52);
-      const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
-      const highLeft = state.totalHigh - state.highSeen;
-      announcement = `Detected ${detectedCards.length}. Running: ${state.runningCount}. True: ${trueCount}. High: ${highLeft}.`;
+      await session.audio.speak('Scan error. Retry.');
     }
-    await session.audio.speak(announcement);
-    console.log('[SCAN] Announcement:', announcement);
-
-  } catch (error: any) {
-    if (error && error.response && error.response.data) {
-      console.error('[SCAN] Error (Roboflow API response):', JSON.stringify(error.response.data));
-    } else {
-      console.error('[SCAN] Error:', error.stack || error.message || error);
-    }
-    await session.audio.speak('Scan error. Retry.');
   }
-}
-  
-  // --- MAIN ROBOTFOW DETECTION, with transparent error details ---
+
   private async detectCards(imageBase64: string): Promise<any[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakov-cards/1';
-    const url = `https://detect.roboflow.com/${modelId}?api_key=${apiKey}`;
-    const payload = {
-      image: `data:image/jpeg;base64,${imageBase64}`,
-    };
+    const modelId = 'yakovs-workspace-vkezy/active-learning-10'; // Updated to the full workflow ID
+
     try {
-      console.log('[DETECT CARDS] POST:', url);
-      console.log('[DETECT CARDS] Payload head:', payload.image.substring(0, 32), '...');
-      const response = await axios.post(url, payload, {
-        headers: { 'Content-Type': 'application/json' }
+      const response = await axios.post(`https://detect.roboflow.com/${modelId}`, imageBase64, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        params: { api_key }
       });
-      console.log('[DETECT CARDS] Roboflow response:', JSON.stringify(response.data, null, 2).substring(0, 500));
-      return (response.data.predictions || []).filter((p: any) => p.confidence > 0.5);
-    } catch (error: any) {
-      if (error.response && error.response.data) {
-        console.error('[DETECT CARDS] Roboflow error response:', JSON.stringify(error.response.data, null, 2));
-      }
-      console.error('[DETECT CARDS] Error details:', error.stack || error.message || error);
-      // You can choose to return the error object for further UI display if you wish.
+      console.log('Roboflow:', response.data.predictions);
+      return response.data.predictions.filter((p: any) => p.confidence > 0.5);
+    } catch (error) {
+      console.error('Roboflow fail:', error);
       return [];
     }
   }
