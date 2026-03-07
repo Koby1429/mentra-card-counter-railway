@@ -1,5 +1,4 @@
 import { AppServer, AppSession } from '@mentra/sdk';
-import * as tf from '@tensorflow/tfjs-node'; // For future ML card detection
 import * as dotenv from 'dotenv';
 import express from 'express'; // For custom routes
 import axios from 'axios'; // For Google Vision API
@@ -8,6 +7,7 @@ dotenv.config(); // Loads .env variables like MENTRA_API_KEY and GOOGLE_API_KEY
 
 // Global store for session states
 const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
+
 // Transcription handlers (global for actions)
 const transcriptionHandlers = new Map<string, (data: any) => void>();
 
@@ -194,7 +194,7 @@ class CardCounterApp extends AppServer {
         announcement = `No cards. True: ${trueCount}.`;
       } else {
         for (const card of detectedCards) {
-          const rank = card.class.slice(0, -1);
+          const rank = card.rank; // From parsed OCR
           const value = this.getCardValue(rank);
           state.runningCount += value;
           state.cardsSeen++;
@@ -247,9 +247,13 @@ class CardCounterApp extends AppServer {
       console.log('[VISION] Full response:', JSON.stringify(response.data));
 
       const texts = response.data.responses[0].textAnnotations || [];
-      const detectedCards = texts.map((t: any) => ({ class: t.description, confidence: 1 })); // Simple mapping; improve parsing for ranks/suits
+      // Improved parsing: Extract rank/suit from text (basic regex; customize for your cards)
+      const detectedCards = texts.map((t: any) => {
+        const match = t.description.match(/([2-9]|10|J|Q|K|A)([â™¥â™¦â™£â™ ]|hearts|diamonds|clubs|spades)/i);
+        return match ? { rank: match[1], suit: match[2], confidence: 0.8 } : null; // Adjust confidence
+      }).filter(Boolean);
 
-      return detectedCards.filter((p: any) => p.confidence > 0.5);
+      return detectedCards;
     } catch (error: any) {
       console.error('[VISION] Fail status: ' + (error.response ? error.response.status : 'No response'));
       console.error('[VISION] Fail status text: ' + (error.response ? error.response.statusText : 'No response'));
