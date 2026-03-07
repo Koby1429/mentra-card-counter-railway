@@ -62,7 +62,7 @@ class CardCounterApp extends AppServer {
       `);
     });
 
-    // Stats API (assumes one session for demo)
+    // Stats API (assumes one session for demo; add sessionId param for multi)
     app.get('/stats', (req, res) => {
       const state = Array.from(sessionStates.values())[0] || { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 };
       const decksLeft = state.decks - (state.cardsSeen / 52);
@@ -135,8 +135,12 @@ class CardCounterApp extends AppServer {
       const photoPromise = session.camera.requestPhoto();
       const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
       const photo = await Promise.race([photoPromise, timeoutPromise]);
-      const imageBase64 = photo.photoData;
-      console.log('Photo received');
+      console.log('Photo received, mimeType:', photo.mimeType, 'data type:', photo.photoData.constructor.name);
+
+      // Convert ArrayBuffer to base64
+      const imageBuffer = Buffer.from(photo.photoData);
+      const imageBase64 = imageBuffer.toString('base64');
+      console.log('Base64 length:', imageBase64.length);
 
       const detectedCards = await this.detectCards(imageBase64);
       console.log(`Detected: ${detectedCards.length}`);
