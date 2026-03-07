@@ -173,6 +173,10 @@ class CardCounterApp extends AppServer {
         throw new Error("Camera photo has no usable binary/image data!");
       }
 
+      // --- Logging for debug purposes ---
+      console.log('[SCAN] About to call detectCards...');
+      console.log('[SCAN] Length of base64 image:', imageBase64.length);
+
       const detectedCards = await this.detectCards(imageBase64);
       console.log(`[SCAN] Detected cards: ${detectedCards ? detectedCards.length : 0}`);
 
@@ -207,23 +211,34 @@ class CardCounterApp extends AppServer {
     }
   }
 
-  // -- THE KEY LINE THAT TARGETS THE CORRECT PROJECT/WORKFLOW --
+  // --- ROBUST AND DIAGNOSTIC CARD DETECTION ---
   private async detectCards(imageBase64: string): Promise<any[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakovs-workspace-vkezy/playing-cards-ow27d-sefl4/1'; // <== Updated to match your project/workflow
+    const modelId = 'yakovs-workspace-vkezy/playing-cards-ow27d-sefl4/1';
+    const endpoint = `https://detect.roboflow.com/${modelId}`;
+
+    // Diagnostic logging:
+    console.log('[RF] Endpoint:', endpoint);
+    console.log('[RF] API key loaded:', typeof apiKey === 'string' && apiKey.length > 10);
+    console.log('[RF] Image base64 length:', imageBase64.length);
+
     try {
       const response = await axios.post(
-        `https://detect.roboflow.com/${modelId}`,
+        endpoint,
         { image: `data:image/jpeg;base64,${imageBase64}` },
         { params: { api_key: apiKey } }
       );
-      console.log('Roboflow:', response.data.predictions);
-      return response.data.predictions.filter((p: any) => p.confidence > 0.5);
+      console.log('[RF] API response:', response.data);
+      return response.data.predictions?.filter((p: any) => p.confidence > 0.5) || [];
     } catch (error: any) {
-      if (error.response && error.response.data) {
-        console.error('Roboflow fail (response):', error.response.data);
+      if (error.response) {
+        // Improved error reporting:
+        console.error('[RF] Fail status:', error.response.status);
+        console.error('[RF] Fail status text:', error.response.statusText);
+        console.error('[RF] Fail headers:', error.response.headers);
+        console.error('[RF] Fail data:', error.response.data);
       } else {
-        console.error('Roboflow fail:', error);
+        console.error('[RF] Fail:', error.stack || error.message || error);
       }
       return [];
     }
