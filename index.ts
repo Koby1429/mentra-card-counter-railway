@@ -8,7 +8,6 @@ dotenv.config(); // Loads .env variables like MENTRA_API_KEY and GOOGLE_API_KEY
 
 // Global store for session states
 const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
-
 // Transcription handlers (global for actions)
 const transcriptionHandlers = new Map<string, (data: any) => void>();
 
