@@ -4,12 +4,12 @@ import * as dotenv from 'dotenv';
 import express from 'express'; // For custom routes
 import axios from 'axios'; // For Roboflow API
 
-dotenv.config(); // Loads .env variables like MENTRA_API_KEY and ROBOFLOW_API_KEY
+dotenv.config(); // Loads .env variables
 
 // Global store for session states
 const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
 
-// Transcription handlers (global for actions)
+// Global store for transcription handlers
 const transcriptionHandlers = new Map<string, (data: any) => void>();
 
 class CardCounterApp extends AppServer {
@@ -62,7 +62,6 @@ class CardCounterApp extends AppServer {
       `);
     });
 
-    // Stats API (assumes one session for demo; add sessionId param for multi)
     app.get('/stats', (req, res) => {
       const state = Array.from(sessionStates.values())[0] || { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 };
       const decksLeft = state.decks - (state.cardsSeen / 52);
@@ -71,11 +70,9 @@ class CardCounterApp extends AppServer {
       res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
     });
 
-    // Action API
     app.post('/action', express.json(), (req, res) => {
       const { command } = req.body;
       console.log(`Action triggered: ${command}`);
-      // Simulate transcription for first active session
       const handler = Array.from(transcriptionHandlers.values())[0];
       if (handler) handler({ text: command });
       res.status(200).send('OK');
@@ -162,13 +159,11 @@ class CardCounterApp extends AppServer {
       let imageBase64: string | null = null;
 
       if (rawData) {
-        // If rawData is a Buffer, ArrayBuffer, or Uint8Array
         if (Buffer.isBuffer(rawData) || rawData instanceof Uint8Array || rawData instanceof ArrayBuffer) {
           const imageBuffer = Buffer.from(rawData);
           imageBase64 = imageBuffer.toString('base64');
           console.log(`[SCAN] Encoded base64 from photo, length: ${imageBase64.length}`);
         } else if (typeof rawData === "string") {
-          // Sometimes, it's already a base64 string
           imageBase64 = rawData.replace(/^data:image\/jpeg;base64,/, "");
           console.log('[SCAN] Raw image data is a string, using as base64 (first 50 chars):', imageBase64.slice(0,50));
         } else {
@@ -217,19 +212,24 @@ class CardCounterApp extends AppServer {
     }
   }
 
+  // FINAL - FIXED Roboflow integration!
   private async detectCards(imageBase64: string): Promise<any[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakovs-workspace-vkezy/active-learning-10'; // Updated to the full workflow ID
-
+    const modelId = 'yakovs-workspace-vkezy/active-learning-10'; // Your full workflow ID!
     try {
-      const response = await axios.post(`https://detect.roboflow.com/${modelId}`, imageBase64, {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        params: { api_key }
-      });
+      const response = await axios.post(
+        `https://detect.roboflow.com/${modelId}`,
+        { image: `data:image/jpeg;base64,${imageBase64}` },
+        { params: { api_key: apiKey } }
+      );
       console.log('Roboflow:', response.data.predictions);
       return response.data.predictions.filter((p: any) => p.confidence > 0.5);
-    } catch (error) {
-      console.error('Roboflow fail:', error);
+    } catch (error: any) {
+      if (error.response && error.response.data) {
+        console.error('Roboflow fail (response):', error.response.data);
+      } else {
+        console.error('Roboflow fail:', error);
+      }
       return [];
     }
   }
