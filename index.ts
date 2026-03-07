@@ -6,218 +6,197 @@ import axios from 'axios'; // For Roboflow API
 
 dotenv.config(); // Loads .env variables like MENTRA_API_KEY and ROBOFLOW_API_KEY
 
+// Global store for session states
+const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
+
+// Transcription handlers (global for actions)
+const transcriptionHandlers = new Map<string, (data: any) => void>();
+
 class CardCounterApp extends AppServer {
   constructor(options: any) {
     super(options);
 
-    // Get Express app instance
     const app = this.getExpressApp();
 
-    // Health check route for Railway
-    app.get('/health', (req, res) => {
-      res.status(200).send('OK - Card Counter is alive and running!');
-    });
+    app.get('/health', (req, res) => res.status(200).send('OK - Card Counter running!'));
 
-    // Webhook route (in case Mentra pings it)
     app.post('/webhook', (req, res) => {
-      console.log('Webhook received:', req.body);
+      console.log('Webhook:', req.body);
       res.status(200).send('OK');
     });
 
-    // Placeholder route for /webview to fix 404 error in Mentra console/simulator
+    // Dashboard webview
     app.get('/webview', (req, res) => {
       res.status(200).send(`
         <html>
-          <body>
-            <h1>Card Counter App</h1>
-            <p>This is the webview for the Card Counter MiniApp.</p>
-            <p>Status: Running. Use voice commands on your Mentra glasses to interact.</p>
-          </body>
-        </html>
+          <head><title>Card Counter Dashboard</title>
+          <style>body { font-family: Arial; text-align: center; padding: 20px; }
+          .stats { margin: 20px; font-size: 18px; }
+          button { padding: 10px 20px; margin: 10px; background: #4CAF50; color: white; border: none; cursor: pointer; }
+          button:hover { background: #45a049; }</style></head>
+          <body><h1>Card Counter Dashboard</h1>
+          <p>Use voice or buttons. Stats update every 5s.</p>
+          <div class="stats">
+            <p>True Count: <span id="trueCount">Loading...</span></p>
+            <p>High Left: <span id="highLeft">Loading...</span></p>
+            <p>Cards Seen: <span id="cardsSeen">Loading...</span></p>
+          </div>
+          <button onclick="trigger('scan cards')">Scan</button>
+          <button onclick="trigger('start streaming')">Start Stream</button>
+          <button onclick="trigger('stop streaming')">Stop Stream</button>
+          <button onclick="trigger('new shoe')">New Shoe</button>
+          <button onclick="trigger('status')">Status</button>
+          <script>
+            async function update() {
+              try { const r = await fetch('/stats'); const d = await r.json();
+                document.getElementById('trueCount').textContent = d.trueCount;
+                document.getElementById('highLeft').textContent = d.highLeft;
+                document.getElementById('cardsSeen').textContent = d.cardsSeen;
+              } catch (e) { console.error(e); }
+            } setInterval(update, 5000); update();
+            async function trigger(cmd) {
+              try { await fetch('/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: cmd }) });
+                alert('Sent: ' + cmd); update(); } catch (e) { alert('Error'); }
+            }
+          </script></body></html>
       `);
+    });
+
+    // Stats API (assumes one session for demo)
+    app.get('/stats', (req, res) => {
+      const state = Array.from(sessionStates.values())[0] || { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 };
+      const decksLeft = state.decks - (state.cardsSeen / 52);
+      const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+      const highLeft = state.totalHigh - state.highSeen;
+      res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
+    });
+
+    // Action API
+    app.post('/action', express.json(), (req, res) => {
+      const { command } = req.body;
+      console.log(`Action triggered: ${command}`);
+      // Simulate transcription for first active session
+      const handler = Array.from(transcriptionHandlers.values())[0];
+      if (handler) handler({ text: command });
+      res.status(200).send('OK');
     });
   }
 
-  protected async onSession(
-    session: AppSession,
-    sessionId: string,
-    userId: string
-  ): Promise<void> {
-    console.log(`New session started: ${sessionId} for user ${userId}`);
-
-    // Initialize shoe state (6 decks)
-    let runningCount = 0;
-    let cardsSeen = 0;
-    let highSeen = 0;
-    const totalCards = 312;      // 6 × 52
-    const totalHigh = 120;       // 10/J/Q/K/A across 6 decks
-    const decks = 6;
+  protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
+    console.log(`Session start: ${sessionId}`);
+    sessionStates.set(sessionId, { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 });
 
     let streamingInterval: NodeJS.Timeout | null = null;
 
-    // Welcome message (private TTS in user's ear)
-    await session.audio.speak('Card counter ready. Say "scan cards" for single scan, or "start streaming" for live tracking.');
+    await session.audio.speak('Ready. Say "scan cards" or "start streaming".');
 
-    // Listen for voice commands via transcription events
-    session.events.onTranscription(async (data) => {
+    const onTrans = async (data: any) => {
       const text = data.text.toLowerCase().trim();
-      console.log(`User said: ${text}`);
+      console.log(`Transcription: ${text}`);
 
-      if (text.includes('scan cards')) {
-        const result = await this.performScan(session, { runningCount, cardsSeen, highSeen, decks, totalHigh });
-        if (result) {
-          runningCount = result.runningCount;
-          cardsSeen = result.cardsSeen;
-          highSeen = result.highSeen;
-        }
-      } else if (text.includes('start streaming')) {
-        if (streamingInterval) {
-          await session.audio.speak('Streaming already active.');
-          return;
-        }
-        await session.audio.speak('Starting live streaming. Tracking cards in real-time.');
-        streamingInterval = setInterval(async () => {
-          const result = await this.performScan(session, { runningCount, cardsSeen, highSeen, decks, totalHigh });
-          if (result) {
-            runningCount = result.runningCount;
-            cardsSeen = result.cardsSeen;
-            highSeen = result.highSeen;
-          }
-        }, 3000); // Every 3 seconds - adjust for flow/battery
+      if (text.includes('scan cards')) await this.performScan(session, sessionStates.get(sessionId)!);
+      else if (text.includes('start streaming')) {
+        if (streamingInterval) return await session.audio.speak('Active.');
+        await session.audio.speak('Streaming started.');
+        streamingInterval = setInterval(() => this.performScan(session, sessionStates.get(sessionId)!), 3000);
       } else if (text.includes('stop streaming')) {
         if (streamingInterval) {
           clearInterval(streamingInterval);
           streamingInterval = null;
-          await session.audio.speak('Stopped streaming.');
-        } else {
-          await session.audio.speak('Not streaming.');
+          await session.audio.speak('Stopped.');
         }
       } else if (text.includes('new shoe')) {
-        runningCount = 0;
-        cardsSeen = 0;
-        highSeen = 0;
-        await session.audio.speak('New shoe started.');
+        const state = sessionStates.get(sessionId)!;
+        state.runningCount = state.cardsSeen = state.highSeen = 0;
+        await session.audio.speak('New shoe.');
       } else if (text.includes('status')) {
-        const decksLeft = decks - (cardsSeen / 52);
-        const trueCount = decksLeft > 0 ? Math.round(runningCount / decksLeft) : 0;
-        const highLeft = totalHigh - highSeen;
-        await session.audio.speak(
-          `True count is ${trueCount}. High cards left: ${highLeft}.`
-        );
-      }
-    });
-
-    // Optional: Add more event handlers later, e.g., button presses
-    // session.events.onButtonPress((data) => { ... });
-
-    // Cleanup streaming on session end
-    this.addCleanupHandler(() => {
-      if (streamingInterval) clearInterval(streamingInterval);
-    });
-  }
-
-  // Perform a single scan/detection (used for both single and streaming)
-  private async performScan(
-    session: AppSession,
-    state: { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }
-  ): Promise<{ runningCount: number; cardsSeen: number; highSeen: number } | null> {
-    try {
-      // Request photo from glasses camera
-      const photo = await session.camera.requestPhoto();
-      const imageBase64 = photo.photoData; // Assuming photoData is base64
-
-      // Detect cards using Roboflow
-      const detectedCards = await this.detectCards(imageBase64);
-
-      let announcement = '';
-
-      if (detectedCards.length === 0) {
-        // Announce no change even if no cards detected (for consistency in streaming)
-        const decksLeft = state.decks - (state.cardsSeen / 52);
-        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
-        announcement = `No cards detected. Current true count remains ${trueCount}.`;
-      } else {
-        // Update Hi-Lo running count
-        for (const card of detectedCards) {
-          const label = card.class; // e.g., '10H', '2S', 'JH'
-          const rank = label.slice(0, -1); // '10', '2', 'J' (removes suit)
-          const value = this.getCardValue(rank);
-          state.runningCount += value;
-          state.cardsSeen++;
-          if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) {
-            state.highSeen++;
-          }
-        }
-
-        // Calculate true count and high cards left
+        const state = sessionStates.get(sessionId)!;
         const decksLeft = state.decks - (state.cardsSeen / 52);
         const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
         const highLeft = state.totalHigh - state.highSeen;
-
-        announcement = `Detected ${detectedCards.length} cards. Running count is ${state.runningCount}. True count is ${trueCount}. High cards left: ${highLeft}.`;
+        await session.audio.speak(`True: ${trueCount}. High: ${highLeft}.`);
       }
+    };
 
-      // Announce results privately
+    session.events.onTranscription(onTrans);
+    transcriptionHandlers.set(sessionId, onTrans);
+
+    this.addCleanupHandler(() => {
+      if (streamingInterval) clearInterval(streamingInterval);
+      sessionStates.delete(sessionId);
+      transcriptionHandlers.delete(sessionId);
+    });
+  }
+
+  private async performScan(session: AppSession, state: any): Promise<void> {
+    try {
+      console.log('Scan start');
+      // Simulate longer timeout (60s)
+      const photoPromise = session.camera.requestPhoto();
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
+      const photo = await Promise.race([photoPromise, timeoutPromise]);
+      const imageBase64 = photo.photoData;
+      console.log('Photo received');
+
+      const detectedCards = await this.detectCards(imageBase64);
+      console.log(`Detected: ${detectedCards.length}`);
+
+      let announcement = '';
+      if (detectedCards.length === 0) {
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        announcement = `No cards. True: ${trueCount}.`;
+      } else {
+        for (const card of detectedCards) {
+          const rank = card.class.slice(0, -1);
+          const value = this.getCardValue(rank);
+          state.runningCount += value;
+          state.cardsSeen++;
+          if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) state.highSeen++;
+        }
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        const highLeft = state.totalHigh - state.highSeen;
+        announcement = `Detected ${detectedCards.length}. Running: ${state.runningCount}. True: ${trueCount}. High: ${highLeft}.`;
+      }
       await session.audio.speak(announcement);
-
-      return detectedCards.length > 0 ? { runningCount: state.runningCount, cardsSeen: state.cardsSeen, highSeen: state.highSeen } : null;
+      console.log('Announced');
     } catch (error) {
-      console.error('Scan error:', error);
-      await session.audio.speak('Error detecting cards. Try again.');
-      return null;
+      console.error('Scan fail:', error.message);
+      await session.audio.speak('Scan error. Retry.');
     }
   }
 
-  // Detect cards using Roboflow Serverless Inference API (V2)
-  private async detectCards(imageBase64: string): Promise<{ class: string; confidence: number }[]> {
+  private async detectCards(imageBase64: string): Promise<any[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'playing-cards-ow27d-sefl4/1'; // Updated to the provided ID
+    const modelId = 'playing-cards-ow27d-sefl4/1';
 
     try {
-      const url = `https://serverless.roboflow.com/${modelId}`;
-      const data = {
-        image: `data:image/jpeg;base64,${imageBase64}`, // Add data URI prefix; change 'jpeg' if needed
-        image_type: 'base64',
-      };
-
-      const response = await axios.post(url, data, {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      console.log('Roboflow predictions:', response.data.predictions);
-      return response.data.predictions.filter((pred: any) => pred.confidence > 0.5);
+      const response = await axios.post(`https://serverless.roboflow.com/${modelId}`, {
+        image: `data:image/jpeg;base64,${imageBase64}`,
+        image_type: 'base64'
+      }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } });
+      console.log('Roboflow:', response.data.predictions);
+      return response.data.predictions.filter((p: any) => p.confidence > 0.5);
     } catch (error) {
-      console.error('Roboflow API error:', error);
+      console.error('Roboflow fail:', error);
       return [];
     }
   }
 
-  // Hi-Lo counting values
   private getCardValue(rank: string): number {
     if (['2', '3', '4', '5', '6'].includes(rank)) return 1;
     if (['7', '8', '9'].includes(rank)) return 0;
-    return -1;  // 10, J, Q, K, A
+    return -1;
   }
 }
 
-// Create the Mentra app with dynamic port and host
-const port = Number(process.env.PORT) || 8080; // Update to match logs
+const port = Number(process.env.PORT) || 8080;
 const server = new CardCounterApp({
   packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
-  port: port,
-  host: '0.0.0.0' // Bind to all interfaces for cloud access
+  port,
+  host: '0.0.0.0'
 });
 
-// Start server (no backup listen to avoid conflict)
-server.start()
-  .then(() => {
-    console.log(`Mentra AppServer started successfully on port ${port}`);
-  })
-  .catch((err) => {
-    console.error('Mentra startup failed:', err.message || err);
-    process.exit(1);
-  });
+server.start().then(() => console.log(`On port ${port}`)).catch(err => { console.error(err); process.exit(1); });
