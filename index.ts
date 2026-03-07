@@ -26,10 +26,12 @@ class CardCounterApp extends AppServer {
       res.status(200).send(`
         <html>
           <head><title>Card Counter Dashboard</title>
-          <style>body { font-family: Arial; text-align: center; padding: 20px; }
-          .stats { margin: 20px; font-size: 18px; }
-          button { padding: 10px 20px; margin: 10px; background: #4CAF50; color: white; border: none; cursor: pointer; }
-          button:hover { background: #45a049; }</style></head>
+          <style>
+            body { font-family: Arial; text-align: center; padding: 20px; }
+            .stats { margin: 20px; font-size: 18px; }
+            button { padding: 10px 20px; margin: 10px; background: #4CAF50; color: white; border: none; cursor: pointer; }
+            button:hover { background: #45a049; }
+          </style></head>
           <body><h1>Card Counter Dashboard</h1>
           <p>Use voice or buttons. Stats update every 5s.</p>
           <div class="stats">
@@ -44,15 +46,24 @@ class CardCounterApp extends AppServer {
           <button onclick="trigger('status')">Status</button>
           <script>
             async function update() {
-              try { const r = await fetch('/stats'); const d = await r.json();
+              try {
+                const r = await fetch('/stats');
+                const d = await r.json();
                 document.getElementById('trueCount').textContent = d.trueCount;
                 document.getElementById('highLeft').textContent = d.highLeft;
                 document.getElementById('cardsSeen').textContent = d.cardsSeen;
               } catch (e) { console.error(e); }
-            } setInterval(update, 5000); update();
+            }
+            setInterval(update, 5000); update();
             async function trigger(cmd) {
-              try { await fetch('/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: cmd }) });
-                alert('Sent: ' + cmd); update(); } catch (e) { alert('Error'); }
+              try {
+                await fetch('/action', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ command: cmd })
+                });
+                alert('Sent: ' + cmd); update();
+              } catch (e) { alert('Error'); }
             }
           </script></body></html>
       `);
@@ -87,11 +98,15 @@ class CardCounterApp extends AppServer {
       const text = data.text.toLowerCase().trim();
       console.log(`[TRANS] Received: ${text} (full data: ${JSON.stringify(data)})`);
 
-      if (text.includes('scan cards')) await this.performScan(session, sessionStates.get(sessionId)!);
-      else if (text.includes('start streaming')) {
+      if (text.includes('scan cards')) {
+        await this.performScan(session, sessionStates.get(sessionId)!);
+      } else if (text.includes('start streaming')) {
         if (streamingInterval) return await session.audio.speak('Active.');
         await session.audio.speak('Streaming started.');
-        streamingInterval = setInterval(() => this.performScan(session, sessionStates.get(sessionId)!), 3000);
+        streamingInterval = setInterval(
+          () => this.performScan(session, sessionStates.get(sessionId)!),
+          3000
+        );
       } else if (text.includes('stop streaming')) {
         if (streamingInterval) {
           clearInterval(streamingInterval);
@@ -100,7 +115,9 @@ class CardCounterApp extends AppServer {
         }
       } else if (text.includes('new shoe')) {
         const state = sessionStates.get(sessionId)!;
-        state.runningCount = state.cardsSeen = state.highSeen = 0;
+        state.runningCount = 0;
+        state.cardsSeen = 0;
+        state.highSeen = 0;
         await session.audio.speak('New shoe.');
       } else if (text.includes('status')) {
         const state = sessionStates.get(sessionId)!;
@@ -128,11 +145,13 @@ class CardCounterApp extends AppServer {
     try {
       console.log('[SCAN] Starting scan...');
       const photoPromise = session.camera.requestPhoto();
-      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
-      const photo = await Promise.race([photoPromise, timeoutPromise]);
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Photo timeout')), 60000)
+      );
+      const photo: any = await Promise.race([photoPromise, timeoutPromise]);
 
       console.log('[SCAN] Full photo object:', photo);
-      if (photo && typeof photo === "object") {
+      if (photo && typeof photo === 'object') {
         console.log('[SCAN] All photo keys:', Object.keys(photo));
         for (const key in photo) {
           if (Object.prototype.hasOwnProperty.call(photo, key)) {
@@ -146,7 +165,12 @@ class CardCounterApp extends AppServer {
       for (const k of candidateKeys) {
         if (photo[k]) {
           rawData = photo[k];
-          console.log(`[SCAN] Using photo.${k} as image data. typeof:`, typeof rawData, 'length:', rawData?.length || rawData?.byteLength);
+          console.log(
+            `[SCAN] Using photo.${k} as image data. typeof:`,
+            typeof rawData,
+            'length:',
+            rawData?.length || rawData?.byteLength
+          );
           break;
         }
       }
@@ -158,22 +182,24 @@ class CardCounterApp extends AppServer {
           const imageBuffer = Buffer.from(rawData);
           imageBase64 = imageBuffer.toString('base64');
           console.log(`[SCAN] Encoded base64 from photo, length: ${imageBase64.length}`);
-        } else if (typeof rawData === "string") {
-          imageBase64 = rawData.replace(/^data:image\/jpeg;base64,/, "");
-          console.log('[SCAN] Raw image data is a string, using as base64 (first 50 chars):', imageBase64.slice(0,50));
+        } else if (typeof rawData === 'string') {
+          imageBase64 = rawData.replace(/^data:image\/jpeg;base64,/, '');
+          console.log(
+            '[SCAN] Raw image data is a string, using as base64 (first 50 chars):',
+            imageBase64.slice(0, 50)
+          );
         } else {
-          throw new Error("Camera photo binary data is in an unrecognized format!");
+          throw new Error('Camera photo binary data is in an unrecognized format!');
         }
       } else if (photo.base64) {
-        console.log("[SCAN] Found base64 property on photo, using as is.");
-        imageBase64 = photo.base64.replace(/^data:image\/jpeg;base64,/, "");
+        console.log('[SCAN] Found base64 property on photo, using as is.');
+        imageBase64 = photo.base64.replace(/^data:image\/jpeg;base64,/, '');
       }
 
       if (!imageBase64) {
-        throw new Error("Camera photo has no usable binary/image data!");
+        throw new Error('Camera photo has no usable binary/image data!');
       }
 
-      // --- Logging for debug purposes ---
       console.log('[SCAN] About to call detectCards...');
       console.log('[SCAN] Length of base64 image:', imageBase64.length);
 
@@ -200,7 +226,6 @@ class CardCounterApp extends AppServer {
       }
       await session.audio.speak(announcement);
       console.log('[SCAN] Announcement:', announcement);
-
     } catch (error: any) {
       if (error && error.response && error.response.data) {
         console.error('[SCAN] Error (Roboflow API response):', JSON.stringify(error.response.data));
@@ -211,28 +236,35 @@ class CardCounterApp extends AppServer {
     }
   }
 
-  // --- ROBUST AND DIAGNOSTIC CARD DETECTION ---
+  // --- CARD DETECTION VIA ROBOFLOW HOSTED API ---
   private async detectCards(imageBase64: string): Promise<any[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
+    // Your Roboflow model endpoint: model-id/version
     const modelId = 'yakovs-workspace-vkezy/playing-cards-ow27d-sefl4/1';
     const endpoint = `https://detect.roboflow.com/${modelId}`;
 
-    // Diagnostic logging:
     console.log('[RF] Endpoint:', endpoint);
     console.log('[RF] API key loaded:', typeof apiKey === 'string' && apiKey.length > 10);
     console.log('[RF] Image base64 length:', imageBase64.length);
 
     try {
-      const response = await axios.post(
-        endpoint,
-        { image: `data:image/jpeg;base64,${imageBase64}` },
-        { params: { api_key: apiKey } }
-      );
+      // Matches the Node.js examples: base64 in body, api_key as query param, x-www-form-urlencoded
+      const response = await axios({
+        method: 'POST',
+        url: endpoint,
+        params: {
+          api_key: apiKey
+        },
+        data: imageBase64,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      });
+
       console.log('[RF] API response:', response.data);
       return response.data.predictions?.filter((p: any) => p.confidence > 0.5) || [];
     } catch (error: any) {
       if (error.response) {
-        // Improved error reporting:
         console.error('[RF] Fail status:', error.response.status);
         console.error('[RF] Fail status text:', error.response.statusText);
         console.error('[RF] Fail headers:', error.response.headers);
@@ -259,4 +291,9 @@ const server = new CardCounterApp({
   host: '0.0.0.0'
 });
 
-server.start().then(() => console.log(`On port ${port}`)).catch(err => { console.error(err); process.exit(1); });
+server.start()
+  .then(() => console.log(`On port ${port}`))
+  .catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
