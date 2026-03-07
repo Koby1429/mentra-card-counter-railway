@@ -173,7 +173,7 @@ class CardCounterApp extends AppServer {
 
   private async detectCards(imageBase64: string): Promise<any[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'playing-cards-ow27d-sefl4/1';
+    const modelId = 'yakov-cards/1'; // Updated to your new project name
 
     try {
       const response = await axios.post(`https://serverless.roboflow.com/${modelId}`, {
