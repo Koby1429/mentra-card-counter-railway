@@ -210,7 +210,7 @@ class CardCounterApp extends AppServer {
   // -- THE KEY LINE THAT TARGETS THE CORRECT PROJECT/WORKFLOW --
   private async detectCards(imageBase64: string): Promise<any[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakovs-workspace-vkezy/playing-cards-ow27d-sefl4'; // <== Updated to match your project/workflow
+    const modelId = 'yakovs-workspace-vkezy/playing-cards-ow27d-sefl4/1'; // <== Updated to match your project/workflow
     try {
       const response = await axios.post(
         `https://detect.roboflow.com/${modelId}`,
