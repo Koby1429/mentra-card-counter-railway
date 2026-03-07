@@ -1,15 +1,12 @@
 import { AppServer, AppSession } from '@mentra/sdk';
 import * as tf from '@tensorflow/tfjs-node'; // For future ML card detection
 import * as dotenv from 'dotenv';
-import express from 'express'; // For custom routes
-import axios from 'axios'; // For Roboflow API
+import express from 'express';
+import axios from 'axios';
 
 dotenv.config(); // Loads .env variables
 
-// Global store for session states
 const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
-
-// Global store for transcription handlers
 const transcriptionHandlers = new Map<string, (data: any) => void>();
 
 class CardCounterApp extends AppServer {
@@ -25,7 +22,6 @@ class CardCounterApp extends AppServer {
       res.status(200).send('OK');
     });
 
-    // Dashboard webview
     app.get('/webview', (req, res) => {
       res.status(200).send(`
         <html>
@@ -145,7 +141,6 @@ class CardCounterApp extends AppServer {
         }
       }
 
-      // Try common keys that might contain the raw photo bits:
       const candidateKeys = ['photoData', 'data', 'buffer', 'bytes'];
       let rawData: any = null;
       for (const k of candidateKeys) {
@@ -212,10 +207,10 @@ class CardCounterApp extends AppServer {
     }
   }
 
-  // FINAL - FIXED Roboflow integration!
+  // -- THE KEY LINE THAT TARGETS THE CORRECT PROJECT/WORKFLOW --
   private async detectCards(imageBase64: string): Promise<any[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakovs-workspace-vkezy/active-learning-10'; // Your full workflow ID!
+    const modelId = 'yakovs-workspace-vkezy/playing-cards-ow27d-sefl4'; // <== Updated to match your project/workflow
     try {
       const response = await axios.post(
         `https://detect.roboflow.com/${modelId}`,
