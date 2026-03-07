@@ -23,6 +23,19 @@ class CardCounterApp extends AppServer {
       console.log('Webhook received:', req.body);
       res.status(200).send('OK');
     });
+
+    // Placeholder route for /webview to fix 404 error in Mentra console/simulator
+    app.get('/webview', (req, res) => {
+      res.status(200).send(`
+        <html>
+          <body>
+            <h1>Card Counter App</h1>
+            <p>This is the webview for the Card Counter MiniApp.</p>
+            <p>Status: Running. Use voice commands on your Mentra glasses to interact.</p>
+          </body>
+        </html>
+      `);
+    });
   }
 
   protected async onSession(
