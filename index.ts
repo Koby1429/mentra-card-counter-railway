@@ -2,9 +2,9 @@ import { AppServer, AppSession } from '@mentra/sdk';
 import * as tf from '@tensorflow/tfjs-node'; // For future ML card detection
 import * as dotenv from 'dotenv';
 import express from 'express'; // For custom routes
-import axios from 'axios'; // For Roboflow API
+import axios from 'axios'; // For Google Vision API
 
-dotenv.config(); // Loads .env variables like MENTRA_API_KEY and ROBOFLOW_API_KEY
+dotenv.config(); // Loads .env variables like MENTRA_API_KEY and GOOGLE_API_KEY
 
 // Global store for session states
 const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
@@ -211,7 +211,7 @@ class CardCounterApp extends AppServer {
 
     } catch (error: any) {
       if (error && error.response && error.response.data) {
-        console.error('[SCAN] Error (Roboflow API response):', JSON.stringify(error.response.data));
+        console.error('[SCAN] Error (Google Vision API response):', JSON.stringify(error.response.data));
       } else {
         console.error('[SCAN] Error:', error.stack || error.message || error);
       }
@@ -220,27 +220,42 @@ class CardCounterApp extends AppServer {
   }
 
   private async detectCards(imageBase64: string): Promise<any[]> {
-    const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakovs-workspace-vkezy/active-learning-10'; // Updated to the full workflow ID
+    const apiKey = process.env.GOOGLE_API_KEY;
+    if (!apiKey) {
+      console.error('[VISION] Google API key not set in env!');
+      return [];
+    }
 
     try {
-      console.log('[RF] Endpoint: https://detect.roboflow.com/' + modelId);
-      console.log('[RF] API key loaded: ' + (apiKey ? 'true' : 'false'));
-      console.log('[RF] Image base64 length: ' + imageBase64.length);
+      console.log('[VISION] Endpoint: https://vision.googleapis.com/v1/images:annotate');
+      console.log('[VISION] API key loaded: ' + (apiKey ? 'true' : 'false'));
+      console.log('[VISION] Image base64 length: ' + imageBase64.length);
 
-      const response = await axios.post(`https://detect.roboflow.com/${modelId}`, imageBase64, {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        params: { api_key: apiKey }
+      const response = await axios.post(`https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`, {
+        requests: [
+          {
+            image: {
+              content: imageBase64
+            },
+            features: [
+              { type: "TEXT_DETECTION" } // OCR for card text; add { type: "LABEL_DETECTION" } if needed
+            ]
+          }
+        ]
       });
 
-      console.log('[RF] Success status: ' + response.status);
-      console.log('[RF] Predictions:', response.data.predictions);
-      return response.data.predictions.filter((p: any) => p.confidence > 0.5);
+      console.log('[VISION] Success status: ' + response.status);
+      console.log('[VISION] Full response:', JSON.stringify(response.data));
+
+      const texts = response.data.responses[0].textAnnotations || [];
+      const detectedCards = texts.map((t: any) => ({ class: t.description, confidence: 1 })); // Simple mapping; improve parsing for ranks/suits
+
+      return detectedCards.filter((p: any) => p.confidence > 0.5);
     } catch (error: any) {
-      console.error('[RF] Fail status: ' + (error.response ? error.response.status : 'No response'));
-      console.error('[RF] Fail status text: ' + (error.response ? error.response.statusText : 'No response'));
-      console.error('[RF] Fail headers: ' + (error.response ? JSON.stringify(error.response.headers) : 'No response'));
-      console.error('[RF] Fail data: ' + (error.response ? JSON.stringify(error.response.data) : 'No response'));
+      console.error('[VISION] Fail status: ' + (error.response ? error.response.status : 'No response'));
+      console.error('[VISION] Fail status text: ' + (error.response ? error.response.statusText : 'No response'));
+      console.error('[VISION] Fail headers: ' + (error.response ? JSON.stringify(error.response.headers) : 'No response'));
+      console.error('[VISION] Fail data: ' + (error.response ? JSON.stringify(error.response.data) : 'No response'));
       return [];
     }
   }
