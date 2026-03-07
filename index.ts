@@ -1,14 +1,11 @@
 import { AppServer, AppSession } from '@mentra/sdk';
 import * as dotenv from 'dotenv';
-import express from 'express'; // For custom routes
-import axios from 'axios'; // For Roboflow API
+import express from 'express';
+import axios from 'axios';
 
-dotenv.config(); // Loads .env variables like MENTRA_API_KEY and ROBOFLOW_API_KEY
+dotenv.config();
 
-// Global store for session states
 const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
-
-// Transcription handlers (global for actions)
 const transcriptionHandlers = new Map<string, (data: any) => void>();
 
 class CardCounterApp extends AppServer {
@@ -19,12 +16,6 @@ class CardCounterApp extends AppServer {
 
     app.get('/health', (req, res) => res.status(200).send('OK - Card Counter running!'));
 
-    app.post('/webhook', (req, res) => {
-      console.log('Webhook:', req.body);
-      res.status(200).send('OK');
-    });
-
-    // Dashboard webview
     app.get('/webview', (req, res) => {
       res.status(200).send(`
         <html>
@@ -61,7 +52,6 @@ class CardCounterApp extends AppServer {
       `);
     });
 
-    // Stats API (assumes one session for demo; add sessionId param for multi)
     app.get('/stats', (req, res) => {
       const state = Array.from(sessionStates.values())[0] || { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 };
       const decksLeft = state.decks - (state.cardsSeen / 52);
@@ -70,11 +60,9 @@ class CardCounterApp extends AppServer {
       res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
     });
 
-    // Action API
     app.post('/action', express.json(), (req, res) => {
       const { command } = req.body;
-      console.log(`Action triggered: ${command}`);
-      // Simulate transcription for first active session
+      console.log(`[ACTION] Triggered: ${command}`);
       const handler = Array.from(transcriptionHandlers.values())[0];
       if (handler) handler({ text: command });
       res.status(200).send('OK');
@@ -82,7 +70,7 @@ class CardCounterApp extends AppServer {
   }
 
   protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
-    console.log(`Session start: ${sessionId}`);
+    console.log(`[SESSION] Start: ${sessionId}`);
     sessionStates.set(sessionId, { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 });
 
     let streamingInterval: NodeJS.Timeout | null = null;
@@ -91,7 +79,7 @@ class CardCounterApp extends AppServer {
 
     const onTrans = async (data: any) => {
       const text = data.text.toLowerCase().trim();
-      console.log(`Transcription: ${text}`);
+      console.log(`[TRANSCRIPTION] User said: "${text}"`);
 
       if (text.includes('scan cards')) await this.performScan(session, sessionStates.get(sessionId)!);
       else if (text.includes('start streaming')) {
@@ -129,23 +117,25 @@ class CardCounterApp extends AppServer {
 
   private async performScan(session: AppSession, state: any): Promise<void> {
     try {
-      console.log('Scan start');
-      // Simulate longer timeout (60s)
+      console.log('[SCAN] Starting scan...');
       const photoPromise = session.camera.requestPhoto();
       const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
       const photo = await Promise.race([photoPromise, timeoutPromise]);
-      console.log('Photo received, mimeType:', photo.mimeType, 'data type:', photo.photoData.constructor.name);
 
-      // Convert ArrayBuffer to base64
+      console.log('[SCAN] Photo captured:', photo ? `mimeType: ${photo.mimeType}, photoData type: ${typeof photo.photoData}` : 'NO PHOTO!');
+      if (!photo || !photo.photoData || !photo.mimeType) {
+        throw new Error('Camera did not return a valid photoData or mimeType!');
+      }
+
       const imageBuffer = Buffer.from(photo.photoData);
       const imageBase64 = imageBuffer.toString('base64');
-      console.log('Base64 length:', imageBase64.length);
+      console.log(`[SCAN] imageBase64 length: ${imageBase64.length}, head: ${imageBase64.substring(0, 32)}...`);
 
       const detectedCards = await this.detectCards(imageBase64);
-      console.log(`Detected: ${detectedCards.length}`);
+      console.log(`[SCAN] Detected cards: ${detectedCards ? detectedCards.length : 0}`);
 
       let announcement = '';
-      if (detectedCards.length === 0) {
+      if (!detectedCards || detectedCards.length === 0) {
         const decksLeft = state.decks - (state.cardsSeen / 52);
         const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
         announcement = `No cards. True: ${trueCount}.`;
@@ -163,34 +153,40 @@ class CardCounterApp extends AppServer {
         announcement = `Detected ${detectedCards.length}. Running: ${state.runningCount}. True: ${trueCount}. High: ${highLeft}.`;
       }
       await session.audio.speak(announcement);
-      console.log('Announced');
+      console.log('[SCAN] Announcement:', announcement);
     } catch (error: any) {
-      console.error('Scan fail:', error.message || error);
+      // Display the full error, stack, and any response for Roboflow/API issues
+      if (error && error.response && error.response.data) {
+        console.error('[SCAN] Error (Roboflow API response):', JSON.stringify(error.response.data));
+      } else {
+        console.error('[SCAN] Error:', error.stack || error.message || error);
+      }
       await session.audio.speak('Scan error. Retry.');
     }
   }
 
-  // FIXED: Uses correct endpoint and authentication pattern!
+  // --- MAIN ROBOTFOW DETECTION, with transparent error details ---
   private async detectCards(imageBase64: string): Promise<any[]> {
     const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakov-cards/1'; // Your model
-
+    const modelId = 'yakov-cards/1';
+    const url = `https://detect.roboflow.com/${modelId}?api_key=${apiKey}`;
+    const payload = {
+      image: `data:image/jpeg;base64,${imageBase64}`,
+    };
     try {
-      const url = `https://detect.roboflow.com/${modelId}?api_key=${apiKey}`;
-      const response = await axios.post(
-        url,
-        {
-          image: `data:image/jpeg;base64,${imageBase64}`,
-        },
-        { headers: { 'Content-Type': 'application/json' } }
-      );
+      console.log('[DETECT CARDS] POST:', url);
+      console.log('[DETECT CARDS] Payload head:', payload.image.substring(0, 32), '...');
+      const response = await axios.post(url, payload, {
+        headers: { 'Content-Type': 'application/json' }
+      });
+      console.log('[DETECT CARDS] Roboflow response:', JSON.stringify(response.data, null, 2).substring(0, 500));
       return (response.data.predictions || []).filter((p: any) => p.confidence > 0.5);
     } catch (error: any) {
-      if (error.response) {
-        console.error('Roboflow fail:', error.response.data);
-      } else {
-        console.error('Roboflow fail:', error.message);
+      if (error.response && error.response.data) {
+        console.error('[DETECT CARDS] Roboflow error response:', JSON.stringify(error.response.data, null, 2));
       }
+      console.error('[DETECT CARDS] Error details:', error.stack || error.message || error);
+      // You can choose to return the error object for further UI display if you wish.
       return [];
     }
   }
