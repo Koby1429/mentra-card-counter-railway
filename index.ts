@@ -159,7 +159,7 @@ class CardCounterApp extends AppServer {
           console.log(`[SCAN] Encoded base64 from photo, length: ${imageBase64.length}`);
         } else if (typeof rawData === "string") {
           imageBase64 = rawData.replace(/^data:image\/jpeg;base64,/, "");
-          console.log('[SCAN] Raw image data is a string, using as base64 (first 50 chars):', imageBase64.slice(0,50));
+          console.log('[SCAN] Raw image data is a string, using as base64 (first 50 chars):', imageBase64.slice(0, 50));
         } else {
           throw new Error("Camera photo binary data is in an unrecognized format!");
         }
@@ -223,21 +223,24 @@ class CardCounterApp extends AppServer {
       console.log('[BASE44] Image base64 length: ' + imageBase64.length);
 
       const response = await axios.post(webhookUrl, {
-        imageBase64: `data:image/jpeg;base64,${imageBase64}`  // ← FIXED
+        imageBase64: `data:image/jpeg;base64,${imageBase64}`
       }, {
         headers: {
           'Content-Type': 'application/json',
           'x-webhook-secret': webhookSecret
-        }
+        },
+        timeout: 60000  // ← FIX 1: 60s timeout
       });
 
       console.log('[BASE44] Success status: ' + response.status);
       console.log('[BASE44] Full response:', response.data);
 
       const parsedData = response.data;
-
       return (parsedData.cards || []).filter((p: any) => p.confidence > 0.6);
+
     } catch (error: any) {
+      console.error('[BASE44] Error message: ' + error.message);       // ← FIX 2: log message
+      console.error('[BASE44] Error code: ' + error.code);             // ← FIX 2: log code
       console.error('[BASE44] Fail status: ' + (error.response ? error.response.status : 'No response'));
       console.error('[BASE44] Fail status text: ' + (error.response ? error.response.statusText : 'No response'));
       console.error('[BASE44] Fail headers: ' + (error.response ? JSON.stringify(error.response.headers) : 'No response'));
@@ -261,4 +264,4 @@ const server = new CardCounterApp({
   host: '0.0.0.0'
 });
 
-server.start().then(() => console.log(`On port ${port}`)).catch
+server.start().then(() => console.log(`On port ${port}`)).catch(err => { console.error(err); process.exit(1); });
