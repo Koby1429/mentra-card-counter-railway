@@ -1,128 +1,140 @@
 import { AppServer, AppSession } from '@mentra/sdk';
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai"; // The new 2026 standard SDK
 import * as dotenv from 'dotenv';
 import express from 'express';
 
 dotenv.config();
 
-// --- 1. Explicit Gemini Initialization ---
-// This matches your Railway 'Variables' tab exactly.
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-
-// We use 'Flash' because it's optimized for high-speed vision tasks.
-const visionModel = genAI.getGenerativeModel({ 
-  model: "gemini-1.5-flash",
-  generationConfig: {
-    temperature: 0.1, // Keeps the AI from "hallucinating" extra cards
-    topP: 0.1,
-  }
-});
+// Initialize the New 2026 SDK
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+// Using 2.5 Flash for the fastest vision processing available in 2026
+const modelName = 'gemini-2.5-flash';
 
 interface SessionState {
   runningCount: number;
   cardsSeen: number;
+  highSeen: number;
   decks: number;
+  totalHigh: number;
   isStreaming: boolean;
 }
 
 const sessionStates = new Map<string, SessionState>();
+const transcriptionHandlers = new Map<string, (data: any) => void>();
 
-class GeminiCardCounter extends AppServer {
+class CardCounterApp extends AppServer {
   constructor(options: any) {
     super(options);
     const app = this.getExpressApp();
 
-    // Stats API for the Webview
+    // Stats for your Webview
     app.get('/stats', (req, res) => {
       const state = Array.from(sessionStates.values())[0] || this.getDefaultState();
       const decksLeft = Math.max(0.5, state.decks - (state.cardsSeen / 52));
       const trueCount = Math.floor(state.runningCount / decksLeft);
-      res.json({ trueCount, cardsSeen: state.cardsSeen });
+      res.json({ trueCount, highLeft: state.totalHigh - state.highSeen, cardsSeen: state.cardsSeen });
     });
 
-    // Voice/Button Command Handler
     app.post('/action', express.json(), (req, res) => {
-      const session = Array.from(sessionStates.keys())[0]; 
-      // In a real app, you'd route this to the specific sessionId
-      this.handleCommand(req.body.command, session);
+      const handler = Array.from(transcriptionHandlers.values())[0];
+      if (handler) handler({ text: req.body.command });
       res.sendStatus(200);
     });
   }
 
   private getDefaultState(): SessionState {
-    return { runningCount: 0, cardsSeen: 0, decks: 6, isStreaming: false };
+    return { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120, isStreaming: false };
   }
 
   protected async onSession(session: AppSession, sessionId: string): Promise<void> {
-    console.log(`[DEPLOY] Gemini Engine Active on Session: ${sessionId}`);
     sessionStates.set(sessionId, this.getDefaultState());
 
-    this.addCleanupHandler(() => sessionStates.delete(sessionId));
-  }
+    const runStream = async () => {
+      const state = sessionStates.get(sessionId);
+      if (!state || !state.isStreaming) return;
 
-  private async handleCommand(cmd: string, sessionId: string) {
-    const state = sessionStates.get(sessionId);
-    if (!state) return;
+      const success = await this.performScan(session, state);
+      if (!success) return; 
 
-    if (cmd.includes('start')) {
-      state.isStreaming = true;
-      this.runVisionLoop(sessionId);
-    } else if (cmd.includes('stop')) {
-      state.isStreaming = false;
-    }
-  }
+      setTimeout(runStream, 3500); 
+    };
 
-  private async runVisionLoop(sessionId: string) {
-    const state = sessionStates.get(sessionId);
-    if (!state || !state.isStreaming) return;
+    const onTrans = async (data: any) => {
+      const text = data.text.toLowerCase();
+      const state = sessionStates.get(sessionId)!;
 
-    try {
-      // 1. Capture frame from Mentra
-      const session = (this as any).sessions?.get(sessionId); // Internal SDK access
-      if (!session) return;
-
-      const photo: any = await session.camera.requestPhoto();
-      const base64 = photo.buffer.toString('base64');
-
-      // 2. Multimodal Vision Request
-      const prompt = "List the ranks of all unique playing cards visible. Format: rank, rank. If none, say 'none'.";
-      const result = await visionModel.generateContent([
-        prompt,
-        { inlineData: { data: base64, mimeType: "image/jpeg" } }
-      ]);
-
-      const text = result.response.text().toUpperCase();
-      
-      // 3. Update Count Logic
-      if (!text.includes('NONE')) {
-        const ranks = text.split(',').map(r => r.trim());
-        ranks.forEach(rank => {
-          if (/^(10|[2-9]|[JQKA])$/.test(rank)) {
-            state.runningCount += this.calculateValue(rank);
-            state.cardsSeen++;
-          }
-        });
-        
-        // Voice Feedback
-        await session.audio.speak(`Updated. Total cards: ${state.cardsSeen}`);
+      if (text.includes('start streaming')) {
+        if (!state.isStreaming) {
+          state.isStreaming = true;
+          await session.audio.speak('Gemini Vision engaged.');
+          runStream();
+        }
+      } else if (text.includes('stop streaming')) {
+        state.isStreaming = false;
+        await session.audio.speak('Stopping scan.');
+      } else if (text.includes('new shoe')) {
+        sessionStates.set(sessionId, this.getDefaultState());
+        await session.audio.speak('New shoe started.');
       }
-    } catch (e) {
-      console.error("Gemini Loop Error:", e);
-    }
+    };
 
-    // Repeat every 4 seconds
-    setTimeout(() => this.runVisionLoop(sessionId), 4000);
+    session.events.onTranscription(onTrans);
+    transcriptionHandlers.set(sessionId, onTrans);
   }
 
-  private calculateValue(rank: string): number {
+  private async performScan(session: AppSession, state: SessionState): Promise<boolean> {
+    try {
+      const photo = await session.camera.requestPhoto({ size: 'medium' });
+      
+      // Mentra 2026 Fix: requestPhoto returns photo.buffer as an ArrayBuffer
+      // We must use Buffer.from to convert it for the Gemini base64 requirement
+      const base64Data = Buffer.from(photo.buffer).toString('base64');
+
+      const prompt = "Identify the ranks of all unique playing cards. Return a comma-separated list like: 2, 10, K, A. If no cards, say 'none'.";
+      
+      // New 2026 SDK Syntax
+      const result = await ai.models.generateContent({
+        model: modelName,
+        contents: [
+          { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
+          { text: prompt }
+        ],
+        config: { temperature: 0.1 }
+      });
+
+      const responseText = result.text.toUpperCase();
+      if (responseText.includes('NONE')) return true;
+
+      const ranks = responseText.split(',').map(s => s.trim());
+      ranks.forEach(rank => {
+        if (/^(10|[2-9]|[JQKA])$/.test(rank)) {
+          state.runningCount += this.getCardValue(rank);
+          state.cardsSeen++;
+          if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) state.highSeen++;
+        }
+      });
+
+      const decksLeft = Math.max(0.5, state.decks - (state.cardsSeen / 52));
+      const trueCount = Math.floor(state.runningCount / decksLeft);
+      if (Math.abs(trueCount) >= 1) {
+        await session.audio.speak(`Count ${trueCount}`);
+      }
+
+      return true;
+    } catch (err: any) {
+      console.error("[GEMINI_2026_ERR]", err);
+      return !err.message.includes("closed");
+    }
+  }
+
+  private getCardValue(rank: string): number {
     if (['2', '3', '4', '5', '6'].includes(rank)) return 1;
-    if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) return -1;
-    return 0;
+    if (['7', '8', '9'].includes(rank)) return 0;
+    return -1;
   }
 }
 
-// Start Server
-new GeminiCardCounter({
+new CardCounterApp({
   packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
   port: Number(process.env.PORT) || 8080
