@@ -141,6 +141,10 @@ class CardCounterApp extends AppServer {
 
   private async performScan(session: AppSession, state: any): Promise<void> {
     try {
+      if (!session.isConnected()) {
+        console.log('[SCAN] Skipping scan - session disconnected');
+        return;
+      }
       console.log('[SCAN] Starting scan...');
       const photoPromise = session.camera.requestPhoto();
       const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
@@ -215,16 +219,20 @@ class CardCounterApp extends AppServer {
         const highLeft = state.totalHigh - state.highSeen;
         announcement = `Detected ${detectedCards.length}. Running: ${state.runningCount}. True: ${trueCount}. High: ${highLeft}.`;
       }
-      await session.audio.speak(announcement);
+      if (session.isConnected()) {
+        await session.audio.speak(announcement);
+      } else {
+        console.log('[SCAN] Skipping announcement - session disconnected');
+      }
       console.log('[SCAN] Announcement:', announcement);
 
     } catch (error: any) {
-      if (error && error.response && error.response.data) {
-        console.error('[SCAN] Error (Google Vision API response):', JSON.stringify(error.response.data));
+      console.error('[SCAN] Error:', error.stack || error.message || error);
+      if (session.isConnected()) {
+        await session.audio.speak('Scan error. Retry.');
       } else {
-        console.error('[SCAN] Error:', error.stack || error.message || error);
+        console.log('[SCAN] Skipping error announcement - session disconnected');
       }
-      await session.audio.speak('Scan error. Retry.');
     }
   }
 
