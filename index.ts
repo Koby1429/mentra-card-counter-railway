@@ -24,7 +24,7 @@ class CardCounterApp extends AppServer {
       const decksLeft = state.decks - (state.cardsSeen / 52);
       const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
       const highLeft = state.totalHigh - state.highSeen;
-      res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
+      res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen, runningCount: state.runningCount });
     });
 
     app.post('/action', express.json(), (req, res) => {
@@ -32,6 +32,89 @@ class CardCounterApp extends AppServer {
       const handler = Array.from(transcriptionHandlers.values())[0];
       if (handler) handler({ text: command });
       res.status(200).send('OK');
+    });
+
+    app.get('/webview', (req, res) => {
+      res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Card Counter</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #111; color: white; padding: 24px; text-align: center; }
+    h2 { font-size: 22px; margin-bottom: 24px; color: #aaa; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+    .card { background: #1f1f1f; border-radius: 12px; padding: 20px 10px; }
+    .label { font-size: 12px; color: #666; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+    .value { font-size: 48px; font-weight: bold; }
+    .tc { color: #22c55e; }
+    .rc { color: #3b82f6; }
+    .hl { color: #f59e0b; }
+    .cs { color: #a78bfa; }
+    .btn { background: #22c55e; color: black; border: none; border-radius: 10px; padding: 14px 28px; font-size: 16px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 8px; }
+    .btn-red { background: #ef4444; color: white; margin-top: 10px; }
+    .status { font-size: 12px; color: #555; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h2>♠ Card Counter</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label">True Count</div>
+      <div class="value tc" id="tc">-</div>
+    </div>
+    <div class="card">
+      <div class="label">Running Count</div>
+      <div class="value rc" id="rc">-</div>
+    </div>
+    <div class="card">
+      <div class="label">High Cards Left</div>
+      <div class="value hl" id="hl">-</div>
+    </div>
+    <div class="card">
+      <div class="label">Cards Seen</div>
+      <div class="value cs" id="cs">-</div>
+    </div>
+  </div>
+
+  <button class="btn" onclick="sendCommand('scan cards')">📸 Scan Cards</button>
+  <button class="btn" style="background:#3b82f6;color:white;margin-top:10px" onclick="sendCommand('start streaming')">▶ Start Streaming</button>
+  <button class="btn" style="background:#6b7280;color:white;margin-top:10px" onclick="sendCommand('stop streaming')">⏹ Stop Streaming</button>
+  <button class="btn btn-red" onclick="sendCommand('new shoe')">🔄 New Shoe</button>
+
+  <div class="status" id="status">Updating...</div>
+
+  <script>
+    async function refresh() {
+      try {
+        const r = await fetch('/stats');
+        const d = await r.json();
+        document.getElementById('tc').textContent = d.trueCount >= 0 ? '+' + d.trueCount : d.trueCount;
+        document.getElementById('rc').textContent = d.runningCount >= 0 ? '+' + d.runningCount : d.runningCount;
+        document.getElementById('hl').textContent = d.highLeft;
+        document.getElementById('cs').textContent = d.cardsSeen;
+        document.getElementById('status').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+      } catch(e) {
+        document.getElementById('status').textContent = 'Connection error';
+      }
+    }
+
+    async function sendCommand(cmd) {
+      await fetch('/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd })
+      });
+      document.getElementById('status').textContent = 'Sent: ' + cmd;
+      setTimeout(refresh, 1000);
+    }
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>`);
     });
   }
 
@@ -87,7 +170,6 @@ class CardCounterApp extends AppServer {
       const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
       const photo = await Promise.race([photoPromise, timeoutPromise]) as any;
 
-      // Extract image data
       let imageBase64: string | null = null;
       for (const k of ['photoData', 'data', 'buffer', 'bytes']) {
         if (photo[k]) {
@@ -105,7 +187,6 @@ class CardCounterApp extends AppServer {
       }
       if (!imageBase64) throw new Error('No usable image data from camera');
 
-      // Forward to Base44 — Base44 handles card detection and updates the dashboard
       const webhookRes = await axios.post(
         BASE44_WEBHOOK_URL,
         { imageBase64: `data:image/jpeg;base64,${imageBase64}` },
@@ -123,7 +204,6 @@ class CardCounterApp extends AppServer {
       if (cards.length === 0) {
         await session.audio.speak('No cards detected.');
       } else {
-        // Update local state from Base44 response
         for (const card of cards) {
           const value = this.getCardValue(card.rank);
           state.runningCount += value;
@@ -156,5 +236,3 @@ const server = new CardCounterApp({
   port,
   host: '0.0.0.0'
 });
-
-server.start().then(() => console.log(`Running on port ${port}`)).catch(err => { console.error(err); process.exit(1); });
