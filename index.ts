@@ -249,7 +249,7 @@ class CardCounterApp extends AppServer {
       const texts = response.data.responses[0].textAnnotations || [];
       // Improved parsing: Extract rank/suit from text (basic regex; customize for your cards)
       const detectedCards = texts.map((t: any) => {
-        const match = t.description.match(/([2-9]|10|J|Q|K|A)([â™¥â™¦â™£â™ ]|hearts|diamonds|clubs|spades)/i);
+        const match = t.description.match(/([2-9]|10|J|Q|K|A)([♥♦♣♠]|hearts|diamonds|clubs|spades)/i);
         return match ? { rank: match[1], suit: match[2], confidence: 0.8 } : null; // Adjust confidence
       }).filter(Boolean);
 
