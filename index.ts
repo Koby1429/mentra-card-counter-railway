@@ -1,155 +1,144 @@
 import { AppServer, AppSession } from '@mentra/sdk';
-// FIX: Use the correct, existing package name
-import { GoogleGenerativeAI } from "@google/generative-ai"; 
 import * as dotenv from 'dotenv';
 import express from 'express';
+import axios from 'axios';
 
 dotenv.config();
 
-// FIX: Correct Initialization for the @google/generative-ai SDK
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const BASE44_WEBHOOK_URL = process.env.BASE44_WEBHOOK_URL!;
+const GLASS_WEBHOOK_SECRET = process.env.GLASS_WEBHOOK_SECRET!;
 
-interface SessionState {
-  runningCount: number;
-  cardsSeen: number;
-  highSeen: number;
-  decks: number;
-  totalHigh: number;
-  isStreaming: boolean;
-}
-
-const sessionStates = new Map<string, SessionState>();
+const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
 const transcriptionHandlers = new Map<string, (data: any) => void>();
 
 class CardCounterApp extends AppServer {
   constructor(options: any) {
     super(options);
+
     const app = this.getExpressApp();
 
-    app.get('/health', (req, res) => res.status(200).send('System Online'));
-
-    app.get('/webview', (req, res) => {
-      res.status(200).send(`
-        <html>
-          <head>
-            <title>Gemini Card Counter</title>
-            <style>
-              body { font-family: sans-serif; background: #1a1a1a; color: #eee; text-align: center; }
-              .card { background: #333; border-radius: 10px; padding: 20px; margin: 20px auto; max-width: 400px; }
-              .stat-val { font-size: 2.5em; color: #4CAF50; }
-              button { padding: 12px 20px; margin: 5px; cursor: pointer; font-weight: bold; border-radius: 5px; border: none; }
-              .start { background: #4CAF50; color: white; }
-              .stop { background: #f44336; color: white; }
-            </style>
-          </head>
-          <body>
-            <h1>Blackjack Analytics (Gemini)</h1>
-            <div class="card">
-              <div class="label">True Count</div>
-              <div id="trueCount" class="stat-val">0</div>
-              <div id="cardsSeen">Cards Seen: 0</div>
-            </div>
-            <button class="start" onclick="trigger('start streaming')">Start Feed</button>
-            <button class="stop" onclick="trigger('stop streaming')">Stop Feed</button>
-            <script>
-              setInterval(async () => {
-                const r = await fetch('/stats');
-                const d = await r.json();
-                document.getElementById('trueCount').textContent = d.trueCount;
-                document.getElementById('cardsSeen').textContent = "Cards Seen: " + d.cardsSeen;
-              }, 2000);
-              async function trigger(cmd) {
-                await fetch('/action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ command: cmd }) });
-              }
-            </script>
-          </body>
-        </html>
-      `);
-    });
+    app.get('/health', (req, res) => res.status(200).send('OK - Card Counter running!'));
 
     app.get('/stats', (req, res) => {
-      const state = Array.from(sessionStates.values())[0] || this.getDefaultState();
-      const decksLeft = Math.max(0.5, state.decks - (state.cardsSeen / 52));
-      const trueCount = Math.floor(state.runningCount / decksLeft);
-      res.json({ trueCount, cardsSeen: state.cardsSeen, highLeft: state.totalHigh - state.highSeen });
+      const state = Array.from(sessionStates.values())[0] || { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 };
+      const decksLeft = state.decks - (state.cardsSeen / 52);
+      const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+      const highLeft = state.totalHigh - state.highSeen;
+      res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
     });
 
     app.post('/action', express.json(), (req, res) => {
+      const { command } = req.body;
       const handler = Array.from(transcriptionHandlers.values())[0];
-      if (handler) handler({ text: req.body.command });
-      res.sendStatus(200);
+      if (handler) handler({ text: command });
+      res.status(200).send('OK');
     });
   }
 
-  private getDefaultState(): SessionState {
-    return { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120, isStreaming: false };
-  }
+  protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
+    console.log(`[SESSION] Start: ${sessionId}`);
+    sessionStates.set(sessionId, { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 });
 
-  protected async onSession(session: AppSession, sessionId: string): Promise<void> {
-    sessionStates.set(sessionId, this.getDefaultState());
+    let streamingInterval: NodeJS.Timeout | null = null;
 
-    const runStream = async () => {
-      const state = sessionStates.get(sessionId);
-      if (!state || !state.isStreaming) return;
-
-      const ok = await this.performScan(session, state);
-      if (!ok) return; // WebSocket closed
-
-      setTimeout(runStream, 4000); 
-    };
+    await session.audio.speak('Ready. Say "scan cards" or "start streaming".');
 
     const onTrans = async (data: any) => {
-      const text = data.text.toLowerCase();
+      const text = data.text.toLowerCase().trim();
       const state = sessionStates.get(sessionId)!;
-      if (text.includes('start streaming')) {
-        state.isStreaming = true;
-        await session.audio.speak('Gemini analyzing.');
-        runStream();
+
+      if (text.includes('scan cards')) {
+        await this.performScan(session, state);
+      } else if (text.includes('start streaming')) {
+        if (streamingInterval) return await session.audio.speak('Already streaming.');
+        await session.audio.speak('Streaming started.');
+        streamingInterval = setInterval(() => this.performScan(session, state), 3000);
       } else if (text.includes('stop streaming')) {
-        state.isStreaming = false;
-        await session.audio.speak('Stopped.');
+        if (streamingInterval) {
+          clearInterval(streamingInterval);
+          streamingInterval = null;
+          await session.audio.speak('Stopped.');
+        }
+      } else if (text.includes('new shoe')) {
+        state.runningCount = state.cardsSeen = state.highSeen = 0;
+        await session.audio.speak('New shoe started.');
+      } else if (text.includes('status')) {
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        const highLeft = state.totalHigh - state.highSeen;
+        await session.audio.speak(`True count: ${trueCount}. High cards left: ${highLeft}.`);
       }
     };
 
     session.events.onTranscription(onTrans);
     transcriptionHandlers.set(sessionId, onTrans);
+
+    this.addCleanupHandler(() => {
+      if (streamingInterval) clearInterval(streamingInterval);
+      sessionStates.delete(sessionId);
+      transcriptionHandlers.delete(sessionId);
+    });
   }
 
-  private async performScan(session: AppSession, state: SessionState): Promise<boolean> {
+  private async performScan(session: AppSession, state: any): Promise<void> {
     try {
-      const photo: any = await session.camera.requestPhoto();
-      const buffer = photo.buffer || photo.photoData || photo.data;
-      if (!buffer) return true;
+      console.log('[SCAN] Capturing photo...');
+      const photoPromise = session.camera.requestPhoto();
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
+      const photo = await Promise.race([photoPromise, timeoutPromise]) as any;
 
-      // Ensure we have a Base64 string from the Buffer
-      const base64Data = Buffer.isBuffer(buffer) ? buffer.toString('base64') : buffer;
-
-      const prompt = "Act as a card counter. List the ranks of all unique playing cards visible. Format: rank, rank. If none, say 'none'.";
-      
-      const result = await model.generateContent([
-        prompt,
-        { inlineData: { data: base64Data, mimeType: "image/jpeg" } }
-      ]);
-
-      const text = result.response.text().toUpperCase();
-      if (text.includes('NONE')) return true;
-
-      const ranks = text.split(',').map(r => r.trim());
-      ranks.forEach(rank => {
-        if (/^(10|[2-9]|[JQKA])$/.test(rank)) {
-          state.runningCount += this.getCardValue(rank);
-          state.cardsSeen++;
-          if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) state.highSeen++;
+      // Extract image data
+      let imageBase64: string | null = null;
+      for (const k of ['photoData', 'data', 'buffer', 'bytes']) {
+        if (photo[k]) {
+          const raw = photo[k];
+          if (Buffer.isBuffer(raw) || raw instanceof Uint8Array || raw instanceof ArrayBuffer) {
+            imageBase64 = Buffer.from(raw).toString('base64');
+          } else if (typeof raw === 'string') {
+            imageBase64 = raw.replace(/^data:image\/jpeg;base64,/, '');
+          }
+          break;
         }
-      });
+      }
+      if (!imageBase64 && photo.base64) {
+        imageBase64 = photo.base64.replace(/^data:image\/jpeg;base64,/, '');
+      }
+      if (!imageBase64) throw new Error('No usable image data from camera');
 
-      const trueCount = Math.floor(state.runningCount / (Math.max(0.5, state.decks - (state.cardsSeen / 52))));
-      if (Math.abs(trueCount) >= 1) await session.audio.speak(`Count ${trueCount}`);
+      // Forward to Base44 — Base44 handles card detection and updates the dashboard
+      const webhookRes = await axios.post(
+        BASE44_WEBHOOK_URL,
+        { imageBase64: `data:image/jpeg;base64,${imageBase64}` },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'x-webhook-secret': GLASS_WEBHOOK_SECRET
+          }
+        }
+      );
 
-      return true;
-    } catch (err: any) {
-      return !err.message.includes("closed");
+      const cards = webhookRes.data?.cards || [];
+      console.log(`[SCAN] Base44 detected ${cards.length} cards`);
+
+      if (cards.length === 0) {
+        await session.audio.speak('No cards detected.');
+      } else {
+        // Update local state from Base44 response
+        for (const card of cards) {
+          const value = this.getCardValue(card.rank);
+          state.runningCount += value;
+          state.cardsSeen++;
+          if (['10', 'J', 'Q', 'K', 'A'].includes(card.rank)) state.highSeen++;
+        }
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        const highLeft = state.totalHigh - state.highSeen;
+        await session.audio.speak(`${cards.length} cards. True count: ${trueCount}. High left: ${highLeft}.`);
+      }
+
+    } catch (error: any) {
+      console.error('[SCAN] Error:', error.message);
+      await session.audio.speak('Scan error. Please retry.');
     }
   }
 
@@ -160,8 +149,12 @@ class CardCounterApp extends AppServer {
   }
 }
 
-new CardCounterApp({
+const port = Number(process.env.PORT) || 8080;
+const server = new CardCounterApp({
   packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
-  port: Number(process.env.PORT) || 8080
-}).start();
+  port,
+  host: '0.0.0.0'
+});
+
+server.start().then(() => console.log(`Running on port ${port}`)).catch(err => { console.error(err); process.exit(1); });
