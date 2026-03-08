@@ -5,6 +5,9 @@ import axios from 'axios';
 
 dotenv.config();
 
+// Use the key you provided
+const GEMINI_API_KEY = "AIzaSyDCfqu-6H_blk6czA7L_EEtmRz3VqKxjLg";
+
 interface SessionState {
   runningCount: number;
   cardsSeen: number;
@@ -104,8 +107,11 @@ class CardCounterApp extends AppServer {
     const runStream = async () => {
       if (!isStreaming) return;
       const state = sessionStates.get(sessionId);
-      if (state) await this.performScan(session, state);
-      setTimeout(runStream, 3500); 
+      if (state) {
+          await this.performScan(session, state);
+      }
+      // Increased delay slightly to allow for Gemini processing time
+      setTimeout(runStream, 4000); 
     };
 
     const onTrans = async (data: any) => {
@@ -140,7 +146,8 @@ class CardCounterApp extends AppServer {
 
   private async performScan(session: AppSession, state: SessionState): Promise<void> {
     try {
-      const photo: any = await session.camera.requestPhoto();
+      // Small size is faster for uploading from the glasses
+      const photo: any = await session.camera.requestPhoto({ size: 'small' });
       const rawData = photo.photoData || photo.data || photo.buffer || photo.base64 || photo.image;
       if (!rawData) return;
 
@@ -151,23 +158,25 @@ class CardCounterApp extends AppServer {
         base64 = rawData.replace(/^data:image\/\w+;base64,/, "");
       }
 
-      const detected = await this.detectCards(base64);
+      // Use Gemini to detect the ranks
+      const detectedRanks = await this.detectCardsWithGemini(base64);
       
-      if (detected.length > 0) {
-        let countChanged = false;
-        detected.forEach(rank => {
+      if (detectedRanks.length > 0) {
+        detectedRanks.forEach(rank => {
           state.runningCount += this.getCardValue(rank);
           state.cardsSeen++;
           if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) state.highSeen++;
-          countChanged = true;
         });
 
-        if (countChanged) {
-          const decksLeft = Math.max(0.5, state.decks - (state.cardsSeen / 52));
-          const trueCount = Math.floor(state.runningCount / decksLeft);
-          if (trueCount !== 0) {
+        const decksLeft = Math.max(0.5, state.decks - (state.cardsSeen / 52));
+        const trueCount = Math.floor(state.runningCount / decksLeft);
+        
+        // Show update on the Glass HUD
+        await session.display.displayText(`Count: ${trueCount} (Seen: ${state.cardsSeen})`);
+        
+        // Voice update for significant count changes
+        if (trueCount !== 0) {
             await session.audio.speak(`${trueCount > 0 ? 'Plus' : ''} ${trueCount}`);
-          }
         }
       }
     } catch (err) {
@@ -175,54 +184,34 @@ class CardCounterApp extends AppServer {
     }
   }
 
-  private async detectCards(imageBase64: string): Promise<string[]> {
-    const apiKey = process.env.GOOGLE_API_KEY;
-    if (!apiKey) return [];
+  private async detectCardsWithGemini(imageBase64: string): Promise<string[]> {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
     try {
-      const resp = await axios.post(`https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`, {
-        requests: [{
-          image: { content: imageBase64 },
-          features: [{ type: "TEXT_DETECTION" }]
-        }]
+      const response = await axios.post(url, {
+        contents: [{
+          parts: [
+            { text: "List the rank of every visible playing card. Use ranks: 2, 3, 4, 5, 6, 7, 8, 9, 10, J, Q, K, A. Return ONLY a JSON array of strings, e.g. [\"A\", \"10\", \"4\"]. If none, return []." },
+            { inline_data: { mime_type: "image/jpeg", data: imageBase64 } }
+          ]
+        }],
+        generationConfig: { response_mime_type: "application/json", temperature: 0.1 }
       });
 
-      const annotations = resp.data.responses[0].textAnnotations || [];
-      if (annotations.length <= 1) return [];
-
-      const foundRanks: { rank: string, x: number, y: number }[] = [];
-      const rankPattern = /^(10|[2-9]|[JQKA])$/i;
-
-      annotations.slice(1).forEach((anno: any) => {
-        const text = anno.description.toUpperCase();
-        if (rankPattern.test(text)) {
-          const v = anno.boundingPoly.vertices[0];
-          foundRanks.push({ rank: text, x: v.x || 0, y: v.y || 0 });
-        }
-      });
-
-      const uniqueResults: string[] = [];
-      const processed = new Set<number>();
-
-      for (let i = 0; i < foundRanks.length; i++) {
-        if (processed.has(i)) continue;
-        uniqueResults.push(foundRanks[i].rank);
-        processed.add(i);
-        for (let j = i + 1; j < foundRanks.length; j++) {
-          const dist = Math.sqrt(Math.pow(foundRanks[i].x - foundRanks[j].x, 2) + Math.pow(foundRanks[i].y - foundRanks[j].y, 2));
-          if (dist < 70 && foundRanks[i].rank === foundRanks[j].rank) processed.add(j);
-        }
-      }
-      return uniqueResults;
+      const resultText = response.data.candidates[0].content.parts[0].text;
+      return JSON.parse(resultText);
     } catch (e) {
+      console.error("[GEMINI_ERR]", e);
       return [];
     }
   }
 
   private getCardValue(rank: string): number {
-    if (['2', '3', '4', '5', '6'].includes(rank)) return 1;
-    if (['7', '8', '9'].includes(rank)) return 0;
-    return -1;
+    const r = rank.toUpperCase();
+    if (['2', '3', '4', '5', '6'].includes(r)) return 1;
+    if (['7', '8', '9'].includes(r)) return 0;
+    if (['10', 'J', 'Q', 'K', 'A'].includes(r)) return -1;
+    return 0;
   }
 }
 
