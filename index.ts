@@ -1,14 +1,11 @@
 import { AppServer, AppSession } from '@mentra/sdk';
 import * as dotenv from 'dotenv';
-import express from 'express'; // For custom routes
-import axios from 'axios'; // For Base44 API
+import express from 'express';
+import axios from 'axios';
 
-dotenv.config(); // Loads .env variables like MENTRA_API_KEY, BASE44_WEBHOOK_URL, GLASS_WEBHOOK_SECRET
+dotenv.config();
 
-// Global store for session states
 const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
-
-// Transcription handlers (global for actions)
 const transcriptionHandlers = new Map<string, (data: any) => void>();
 
 class CardCounterApp extends AppServer {
@@ -24,7 +21,6 @@ class CardCounterApp extends AppServer {
       res.status(200).send('OK');
     });
 
-    // Dashboard webview
     app.get('/webview', (req, res) => {
       res.status(200).send(`
         <html>
@@ -61,7 +57,6 @@ class CardCounterApp extends AppServer {
       `);
     });
 
-    // Stats API (assumes one session for demo; add sessionId param for multi)
     app.get('/stats', (req, res) => {
       const state = Array.from(sessionStates.values())[0] || { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 };
       const decksLeft = state.decks - (state.cardsSeen / 52);
@@ -70,11 +65,9 @@ class CardCounterApp extends AppServer {
       res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
     });
 
-    // Action API
     app.post('/action', express.json(), (req, res) => {
       const { command } = req.body;
       console.log(`Action triggered: ${command}`);
-      // Simulate transcription for first active session
       const handler = Array.from(transcriptionHandlers.values())[0];
       if (handler) handler({ text: command });
       res.status(200).send('OK');
@@ -147,7 +140,6 @@ class CardCounterApp extends AppServer {
         }
       }
 
-      // Try common keys that might contain the raw photo bits:
       const candidateKeys = ['photoData', 'data', 'buffer', 'bytes'];
       let rawData: any = null;
       for (const k of candidateKeys) {
@@ -161,13 +153,11 @@ class CardCounterApp extends AppServer {
       let imageBase64: string | null = null;
 
       if (rawData) {
-        // If rawData is a Buffer, ArrayBuffer, or Uint8Array
         if (Buffer.isBuffer(rawData) || rawData instanceof Uint8Array || rawData instanceof ArrayBuffer) {
           const imageBuffer = Buffer.from(rawData);
           imageBase64 = imageBuffer.toString('base64');
           console.log(`[SCAN] Encoded base64 from photo, length: ${imageBase64.length}`);
         } else if (typeof rawData === "string") {
-          // Sometimes, it's already a base64 string
           imageBase64 = rawData.replace(/^data:image\/jpeg;base64,/, "");
           console.log('[SCAN] Raw image data is a string, using as base64 (first 50 chars):', imageBase64.slice(0,50));
         } else {
@@ -194,7 +184,7 @@ class CardCounterApp extends AppServer {
         announcement = `No cards. True: ${trueCount}.`;
       } else {
         for (const card of detectedCards) {
-          const rank = card.class.slice(0, -1);
+          const rank = card.rank;
           const value = this.getCardValue(rank);
           state.runningCount += value;
           state.cardsSeen++;
@@ -233,26 +223,20 @@ class CardCounterApp extends AppServer {
       console.log('[BASE44] Image base64 length: ' + imageBase64.length);
 
       const response = await axios.post(webhookUrl, {
-        image: imageBase64  // Assuming body format; adjust if Base44 expects different
+        imageBase64: `data:image/jpeg;base64,${imageBase64}`  // ← FIXED
       }, {
         headers: {
           'Content-Type': 'application/json',
-          'X-Glass-Webhook-Secret': webhookSecret  // Assuming header name; adjust if different
+          'x-webhook-secret': webhookSecret
         }
       });
 
       console.log('[BASE44] Success status: ' + response.status);
-      console.log('[BASE44] Full response:', response.data);  // Log full response for debugging
+      console.log('[BASE44] Full response:', response.data);
 
-      // Parse the response if it's "here is your json {actual json}"
-      let jsonString = response.data;
-      if (jsonString.startsWith('here is your json ')) {
-        jsonString = jsonString.replace('here is your json ', '');
-      }
-      const parsedData = JSON.parse(jsonString);
+      const parsedData = response.data;
 
-      // Assuming parsedData has { predictions: [...] } like Roboflow; adjust if different
-      return (parsedData.predictions || []).filter((p: any) => p.confidence > 0.5);
+      return (parsedData.cards || []).filter((p: any) => p.confidence > 0.6);
     } catch (error: any) {
       console.error('[BASE44] Fail status: ' + (error.response ? error.response.status : 'No response'));
       console.error('[BASE44] Fail status text: ' + (error.response ? error.response.statusText : 'No response'));
@@ -277,4 +261,4 @@ const server = new CardCounterApp({
   host: '0.0.0.0'
 });
 
-server.start().then(() => console.log(`On port ${port}`)).catch(err => { console.error(err); process.exit(1); });
+server.start().then(() => console.log(`On port ${port}`)).catch
