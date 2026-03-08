@@ -1,14 +1,14 @@
 import { AppServer, AppSession } from '@mentra/sdk';
-import { GoogleGenAI } from "@google/genai"; // The new 2026 standard SDK
+// FIX: Use the correct, existing package name
+import { GoogleGenerativeAI } from "@google/generative-ai"; 
 import * as dotenv from 'dotenv';
 import express from 'express';
 
 dotenv.config();
 
-// Initialize the New 2026 SDK
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-// Using 2.5 Flash for the fastest vision processing available in 2026
-const modelName = 'gemini-2.5-flash';
+// FIX: Correct Initialization for the @google/generative-ai SDK
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 interface SessionState {
   runningCount: number;
@@ -27,12 +27,52 @@ class CardCounterApp extends AppServer {
     super(options);
     const app = this.getExpressApp();
 
-    // Stats for your Webview
+    app.get('/health', (req, res) => res.status(200).send('System Online'));
+
+    app.get('/webview', (req, res) => {
+      res.status(200).send(`
+        <html>
+          <head>
+            <title>Gemini Card Counter</title>
+            <style>
+              body { font-family: sans-serif; background: #1a1a1a; color: #eee; text-align: center; }
+              .card { background: #333; border-radius: 10px; padding: 20px; margin: 20px auto; max-width: 400px; }
+              .stat-val { font-size: 2.5em; color: #4CAF50; }
+              button { padding: 12px 20px; margin: 5px; cursor: pointer; font-weight: bold; border-radius: 5px; border: none; }
+              .start { background: #4CAF50; color: white; }
+              .stop { background: #f44336; color: white; }
+            </style>
+          </head>
+          <body>
+            <h1>Blackjack Analytics (Gemini)</h1>
+            <div class="card">
+              <div class="label">True Count</div>
+              <div id="trueCount" class="stat-val">0</div>
+              <div id="cardsSeen">Cards Seen: 0</div>
+            </div>
+            <button class="start" onclick="trigger('start streaming')">Start Feed</button>
+            <button class="stop" onclick="trigger('stop streaming')">Stop Feed</button>
+            <script>
+              setInterval(async () => {
+                const r = await fetch('/stats');
+                const d = await r.json();
+                document.getElementById('trueCount').textContent = d.trueCount;
+                document.getElementById('cardsSeen').textContent = "Cards Seen: " + d.cardsSeen;
+              }, 2000);
+              async function trigger(cmd) {
+                await fetch('/action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ command: cmd }) });
+              }
+            </script>
+          </body>
+        </html>
+      `);
+    });
+
     app.get('/stats', (req, res) => {
       const state = Array.from(sessionStates.values())[0] || this.getDefaultState();
       const decksLeft = Math.max(0.5, state.decks - (state.cardsSeen / 52));
       const trueCount = Math.floor(state.runningCount / decksLeft);
-      res.json({ trueCount, highLeft: state.totalHigh - state.highSeen, cardsSeen: state.cardsSeen });
+      res.json({ trueCount, cardsSeen: state.cardsSeen, highLeft: state.totalHigh - state.highSeen });
     });
 
     app.post('/action', express.json(), (req, res) => {
@@ -53,28 +93,22 @@ class CardCounterApp extends AppServer {
       const state = sessionStates.get(sessionId);
       if (!state || !state.isStreaming) return;
 
-      const success = await this.performScan(session, state);
-      if (!success) return; 
+      const ok = await this.performScan(session, state);
+      if (!ok) return; // WebSocket closed
 
-      setTimeout(runStream, 3500); 
+      setTimeout(runStream, 4000); 
     };
 
     const onTrans = async (data: any) => {
       const text = data.text.toLowerCase();
       const state = sessionStates.get(sessionId)!;
-
       if (text.includes('start streaming')) {
-        if (!state.isStreaming) {
-          state.isStreaming = true;
-          await session.audio.speak('Gemini Vision engaged.');
-          runStream();
-        }
+        state.isStreaming = true;
+        await session.audio.speak('Gemini analyzing.');
+        runStream();
       } else if (text.includes('stop streaming')) {
         state.isStreaming = false;
-        await session.audio.speak('Stopping scan.');
-      } else if (text.includes('new shoe')) {
-        sessionStates.set(sessionId, this.getDefaultState());
-        await session.audio.speak('New shoe started.');
+        await session.audio.speak('Stopped.');
       }
     };
 
@@ -84,28 +118,24 @@ class CardCounterApp extends AppServer {
 
   private async performScan(session: AppSession, state: SessionState): Promise<boolean> {
     try {
-      const photo = await session.camera.requestPhoto({ size: 'medium' });
+      const photo: any = await session.camera.requestPhoto();
+      const buffer = photo.buffer || photo.photoData || photo.data;
+      if (!buffer) return true;
+
+      // Ensure we have a Base64 string from the Buffer
+      const base64Data = Buffer.isBuffer(buffer) ? buffer.toString('base64') : buffer;
+
+      const prompt = "Act as a card counter. List the ranks of all unique playing cards visible. Format: rank, rank. If none, say 'none'.";
       
-      // Mentra 2026 Fix: requestPhoto returns photo.buffer as an ArrayBuffer
-      // We must use Buffer.from to convert it for the Gemini base64 requirement
-      const base64Data = Buffer.from(photo.buffer).toString('base64');
+      const result = await model.generateContent([
+        prompt,
+        { inlineData: { data: base64Data, mimeType: "image/jpeg" } }
+      ]);
 
-      const prompt = "Identify the ranks of all unique playing cards. Return a comma-separated list like: 2, 10, K, A. If no cards, say 'none'.";
-      
-      // New 2026 SDK Syntax
-      const result = await ai.models.generateContent({
-        model: modelName,
-        contents: [
-          { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
-          { text: prompt }
-        ],
-        config: { temperature: 0.1 }
-      });
+      const text = result.response.text().toUpperCase();
+      if (text.includes('NONE')) return true;
 
-      const responseText = result.text.toUpperCase();
-      if (responseText.includes('NONE')) return true;
-
-      const ranks = responseText.split(',').map(s => s.trim());
+      const ranks = text.split(',').map(r => r.trim());
       ranks.forEach(rank => {
         if (/^(10|[2-9]|[JQKA])$/.test(rank)) {
           state.runningCount += this.getCardValue(rank);
@@ -114,15 +144,11 @@ class CardCounterApp extends AppServer {
         }
       });
 
-      const decksLeft = Math.max(0.5, state.decks - (state.cardsSeen / 52));
-      const trueCount = Math.floor(state.runningCount / decksLeft);
-      if (Math.abs(trueCount) >= 1) {
-        await session.audio.speak(`Count ${trueCount}`);
-      }
+      const trueCount = Math.floor(state.runningCount / (Math.max(0.5, state.decks - (state.cardsSeen / 52))));
+      if (Math.abs(trueCount) >= 1) await session.audio.speak(`Count ${trueCount}`);
 
       return true;
     } catch (err: any) {
-      console.error("[GEMINI_2026_ERR]", err);
       return !err.message.includes("closed");
     }
   }
