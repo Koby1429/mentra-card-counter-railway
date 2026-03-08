@@ -1,16 +1,279 @@
-{
-  "name": "mentra-card-counter",
-  "version": "1.0.0",
-  "main": "index.ts",
-  "type": "module",
-  "scripts": {
-    "start": "bun index.ts"
-  },
-  "dependencies": {
-    "@mentra/sdk": "^2.1.29",
-    "@tensorflow/tfjs-node": "^4.17.0",
-    "dotenv": "^16.4.5",
-    "express": "^4.18.2",
-    "@roboflow/inference-sdk": "^0.3.0"
+import { AppServer, AppSession } from '@mentra/sdk';
+import * as dotenv from 'dotenv';
+import express from 'express'; // For custom routes
+import axios from 'axios'; // For Base44 API
+
+dotenv.config(); // Loads .env variables like MENTRA_API_KEY, BASE44_WEBHOOK_URL, GLASS_WEBHOOK_SECRET
+
+// Global store for session states
+const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
+
+// Transcription handlers (global for actions)
+const transcriptionHandlers = new Map<string, (data: any) => void>();
+
+class CardCounterApp extends AppServer {
+  constructor(options: any) {
+    super(options);
+
+    const app = this.getExpressApp();
+
+    app.get('/health', (req, res) => res.status(200).send('OK - Card Counter running!'));
+
+    app.post('/webhook', (req, res) => {
+      try {
+        console.log('Webhook:', JSON.stringify(req.body)); // Safe JSON log
+        // Process if needed
+        res.status(200).send('OK');
+      } catch (err) {
+        console.error('Webhook error:', err);
+        res.status(500).send('Error');
+      }
+    });
+
+    // Dashboard webview
+    app.get('/webview', (req, res) => {
+      res.status(200).send(`
+        <html>
+          <head><title>Card Counter Dashboard</title>
+          <style>body { font-family: Arial; text-align: center; padding: 20px; }
+          .stats { margin: 20px; font-size: 18px; }
+          button { padding: 10px 20px; margin: 10px; background: #4CAF50; color: white; border: none; cursor: pointer; }
+          button:hover { background: #45a049; }</style></head>
+          <body><h1>Card Counter Dashboard</h1>
+          <p>Use voice or buttons. Stats update every 5s.</p>
+          <div class="stats">
+            <p>True Count: <span id="trueCount">Loading...</span></p>
+            <p>High Left: <span id="highLeft">Loading...</span></p>
+            <p>Cards Seen: <span id="cardsSeen">Loading...</span></p>
+          </div>
+          <button onclick="trigger('scan cards')">Scan</button>
+          <button onclick="trigger('start streaming')">Start Stream</button>
+          <button onclick="trigger('stop streaming')">Stop Stream</button>
+          <button onclick="trigger('new shoe')">New Shoe</button>
+          <button onclick="trigger('status')">Status</button>
+          <script>
+            async function update() {
+              try { const r = await fetch('/stats'); const d = await r.json();
+                document.getElementById('trueCount').textContent = d.trueCount;
+                document.getElementById('highLeft').textContent = d.highLeft;
+                document.getElementById('cardsSeen').textContent = d.cardsSeen;
+              } catch (e) { console.error(e); }
+            } setInterval(update, 5000); update();
+            async function trigger(cmd) {
+              try { await fetch('/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: cmd }) });
+                alert('Sent: ' + cmd); update(); } catch (e) { alert('Error'); }
+            }
+          </script></body></html>
+      `);
+    });
+
+    // Stats API (assumes one session for demo; add sessionId param for multi)
+    app.get('/stats', (req, res) => {
+      const state = Array.from(sessionStates.values())[0] || { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 };
+      const decksLeft = state.decks - (state.cardsSeen / 52);
+      const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+      const highLeft = state.totalHigh - state.highSeen;
+      res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
+    });
+
+    // Action API
+    app.post('/action', express.json(), (req, res) => {
+      const { command } = req.body;
+      console.log(`Action triggered: ${command}`);
+      // Simulate transcription for first active session
+      const handler = Array.from(transcriptionHandlers.values())[0];
+      if (handler) handler({ text: command });
+      res.status(200).send('OK');
+    });
+  }
+
+  protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
+    console.log(`[SESSION] Start: ${sessionId}`);
+    sessionStates.set(sessionId, { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 });
+
+    let streamingInterval: NodeJS.Timeout | null = null;
+
+    await session.audio.speak('Ready. Say "scan cards" or "start streaming".');
+
+    const onTrans = async (data: any) => {
+      const text = data.text.toLowerCase().trim();
+      console.log(`[TRANS] Received: ${text} (full data: ${JSON.stringify(data)})`);
+
+      if (text.includes('scan cards')) await this.performScan(session, sessionStates.get(sessionId)!);
+      else if (text.includes('start streaming')) {
+        if (streamingInterval) return await session.audio.speak('Active.');
+        await session.audio.speak('Streaming started.');
+        streamingInterval = setInterval(() => this.performScan(session, sessionStates.get(sessionId)!), 3000);
+      } else if (text.includes('stop streaming')) {
+        if (streamingInterval) {
+          clearInterval(streamingInterval);
+          streamingInterval = null;
+          await session.audio.speak('Stopped.');
+        }
+      } else if (text.includes('new shoe')) {
+        const state = sessionStates.get(sessionId)!;
+        state.runningCount = state.cardsSeen = state.highSeen = 0;
+        await session.audio.speak('New shoe.');
+      } else if (text.includes('status')) {
+        const state = sessionStates.get(sessionId)!;
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        const highLeft = state.totalHigh - state.highSeen;
+        await session.audio.speak(`True: ${trueCount}. High: ${highLeft}.`);
+      } else {
+        console.log(`[TRANS] Unrecognized command: ${text}`);
+      }
+    };
+
+    session.events.onTranscription(onTrans);
+    transcriptionHandlers.set(sessionId, onTrans);
+
+    this.addCleanupHandler(() => {
+      if (streamingInterval) clearInterval(streamingInterval);
+      sessionStates.delete(sessionId);
+      transcriptionHandlers.delete(sessionId);
+      console.log(`[SESSION] Cleanup: ${sessionId}`);
+    });
+  }
+
+  private async performScan(session: AppSession, state: any): Promise<void> {
+    try {
+      console.log('[SCAN] Starting scan...');
+      const photoPromise = session.camera.requestPhoto();
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
+      const photo = await Promise.race([photoPromise, timeoutPromise]);
+
+      console.log('[SCAN] Full photo object:', photo);
+      if (photo && typeof photo === "object") {
+        console.log('[SCAN] All photo keys:', Object.keys(photo));
+        for (const key in photo) {
+          if (Object.prototype.hasOwnProperty.call(photo, key)) {
+            console.log(`[SCAN] Key: ${key} typeof:`, typeof photo[key]);
+          }
+        }
+      }
+
+      // Try common keys that might contain the raw photo bits:
+      const candidateKeys = ['photoData', 'data', 'buffer', 'bytes'];
+      let rawData: any = null;
+      for (const k of candidateKeys) {
+        if (photo[k]) {
+          rawData = photo[k];
+          console.log(`[SCAN] Using photo.${k} as image data. typeof:`, typeof rawData, 'length:', rawData?.length || rawData?.byteLength);
+          break;
+        }
+      }
+
+      let imageBase64: string | null = null;
+
+      if (rawData) {
+        // If rawData is a Buffer, ArrayBuffer, or Uint8Array
+        if (Buffer.isBuffer(rawData) || rawData instanceof Uint8Array || rawData instanceof ArrayBuffer) {
+          const imageBuffer = Buffer.from(rawData);
+          imageBase64 = imageBuffer.toString('base64');
+          console.log(`[SCAN] Encoded base64 from photo, length: ${imageBase64.length}`);
+        } else if (typeof rawData === "string") {
+          // Sometimes, it's already a base64 string
+          imageBase64 = rawData.replace(/^data:image\/jpeg;base64,/, "");
+          console.log('[SCAN] Raw image data is a string, using as base64 (first 50 chars):', imageBase64.slice(0,50));
+        } else {
+          throw new Error("Camera photo binary data is in an unrecognized format!");
+        }
+      } else if (photo.base64) {
+        console.log("[SCAN] Found base64 property on photo, using as is.");
+        imageBase64 = photo.base64.replace(/^data:image\/jpeg;base64,/, "");
+      }
+
+      if (!imageBase64) {
+        throw new Error("Camera photo has no usable binary/image data!");
+      }
+
+      console.log('[SCAN] About to call detectCards...');
+      console.log('[SCAN] Length of base64 image: ' + imageBase64.length);
+      const detectedCards = await this.detectCards(imageBase64);
+      console.log(`[SCAN] Detected cards: ${detectedCards ? detectedCards.length : 0}`);
+
+      let announcement = '';
+      if (!detectedCards || detectedCards.length === 0) {
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        announcement = `No cards. True: ${trueCount}.`;
+      } else {
+        for (const card of detectedCards) {
+          const rank = card.class.slice(0, -1);
+          const value = this.getCardValue(rank);
+          state.runningCount += value;
+          state.cardsSeen++;
+          if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) state.highSeen++;
+        }
+        const decksLeft = state.decks - (state.cardsSeen / 52);
+        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        const highLeft = state.totalHigh - state.highSeen;
+        announcement = `Detected ${detectedCards.length}. Running: ${state.runningCount}. True: ${trueCount}. High: ${highLeft}.`;
+      }
+      await session.audio.speak(announcement);
+      console.log('[SCAN] Announcement:', announcement);
+
+    } catch (error: any) {
+      if (error && error.response && error.response.data) {
+        console.error('[SCAN] Error (Base44 API response):', JSON.stringify(error.response.data));
+      } else {
+        console.error('[SCAN] Error:', error.stack || error.message || error);
+      }
+      await session.audio.speak('Scan error. Retry.');
+    }
+  }
+
+  private async detectCards(imageBase64: string): Promise<any[]> {
+    const webhookUrl = process.env.BASE44_WEBHOOK_URL;
+    const webhookSecret = process.env.GLASS_WEBHOOK_SECRET;
+
+    if (!webhookUrl || !webhookSecret) {
+      console.error('[BASE44] Webhook URL or secret not set in env!');
+      return [];
+    }
+
+    try {
+      console.log('[BASE44] Endpoint: ' + webhookUrl);
+      console.log('[BASE44] Secret loaded: ' + (webhookSecret ? 'true' : 'false'));
+      console.log('[BASE44] Image base64 length: ' + imageBase64.length);
+
+      const response = await axios.post(webhookUrl, {
+        image: imageBase64  // Assuming body format; adjust if Base44 expects different
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Glass-Webhook-Secret': webhookSecret  // Assuming header name; adjust if different
+        }
+      });
+
+      console.log('[BASE44] Success status: ' + response.status);
+      console.log('[BASE44] Predictions:', response.data);  // Log full response for debugging
+
+      // Assuming Base44 returns { predictions: [...] } like Roboflow; adjust parsing if different
+      return (response.data.predictions || []).filter((p: any) => p.confidence > 0.5);
+    } catch (error: any) {
+      console.error('[BASE44] Fail status: ' + (error.response ? error.response.status : 'No response'));
+      console.error('[BASE44] Fail status text: ' + (error.response ? error.response.statusText : 'No response'));
+      console.error('[BASE44] Fail headers: ' + (error.response ? JSON.stringify(error.response.headers) : 'No response'));
+      console.error('[BASE44] Fail data: ' + (error.response ? JSON.stringify(error.response.data) : 'No response'));
+      return [];
+    }
+  }
+
+  private getCardValue(rank: string): number {
+    if (['2', '3', '4', '5', '6'].includes(rank)) return 1;
+    if (['7', '8', '9'].includes(rank)) return 0;
+    return -1;
   }
 }
+
+const port = Number(process.env.PORT) || 8080;
+const server = new CardCounterApp({
+  packageName: 'com.yakov.cardcounter',
+  apiKey: process.env.MENTRA_API_KEY!,
+  port,
+  host: '0.0.0.0'
+});
+
+server.start().then(() => console.log(`On port ${port}`)).catch(err => { console.error(err); process.exit(1); });
