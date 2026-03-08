@@ -1,15 +1,14 @@
 import { AppServer, AppSession } from '@mentra/sdk';
-import * as tf from '@tensorflow/tfjs-node'; // For future ML card detection
 import * as dotenv from 'dotenv';
-import express from 'express'; // For custom routes
-import axios from 'axios'; // For Roboflow API
+import express from 'express';
+import axios from 'axios';
 
-dotenv.config(); // Loads .env variables like MENTRA_API_KEY and ROBOFLOW_API_KEY
+dotenv.config();
 
-// Global store for session states
+const BASE44_WEBHOOK_URL = process.env.BASE44_WEBHOOK_URL!;
+const GLASS_WEBHOOK_SECRET = process.env.GLASS_WEBHOOK_SECRET!;
+
 const sessionStates = new Map<string, { runningCount: number; cardsSeen: number; highSeen: number; decks: number; totalHigh: number }>();
-
-// Transcription handlers (global for actions)
 const transcriptionHandlers = new Map<string, (data: any) => void>();
 
 class CardCounterApp extends AppServer {
@@ -20,62 +19,88 @@ class CardCounterApp extends AppServer {
 
     app.get('/health', (req, res) => res.status(200).send('OK - Card Counter running!'));
 
-    app.post('/webhook', (req, res) => {
-      console.log('Webhook:', req.body);
+    app.post('/webhook', express.json(), (req, res) => {
+      console.log('Webhook received:', req.body);
       res.status(200).send('OK');
     });
 
-    // Dashboard webview
     app.get('/webview', (req, res) => {
       res.status(200).send(`
+        <!DOCTYPE html>
         <html>
-          <head><title>Card Counter Dashboard</title>
-          <style>body { font-family: Arial; text-align: center; padding: 20px; }
-          .stats { margin: 20px; font-size: 18px; }
-          button { padding: 10px 20px; margin: 10px; background: #4CAF50; color: white; border: none; cursor: pointer; }
-          button:hover { background: #45a049; }</style></head>
-          <body><h1>Card Counter Dashboard</h1>
-          <p>Use voice or buttons. Stats update every 5s.</p>
-          <div class="stats">
-            <p>True Count: <span id="trueCount">Loading...</span></p>
-            <p>High Left: <span id="highLeft">Loading...</span></p>
-            <p>Cards Seen: <span id="cardsSeen">Loading...</span></p>
-          </div>
-          <button onclick="trigger('scan cards')">Scan</button>
-          <button onclick="trigger('start streaming')">Start Stream</button>
-          <button onclick="trigger('stop streaming')">Stop Stream</button>
-          <button onclick="trigger('new shoe')">New Shoe</button>
-          <button onclick="trigger('status')">Status</button>
-          <script>
-            async function update() {
-              try { const r = await fetch('/stats'); const d = await r.json();
-                document.getElementById('trueCount').textContent = d.trueCount;
-                document.getElementById('highLeft').textContent = d.highLeft;
-                document.getElementById('cardsSeen').textContent = d.cardsSeen;
-              } catch (e) { console.error(e); }
-            } setInterval(update, 5000); update();
-            async function trigger(cmd) {
-              try { await fetch('/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: cmd }) });
-                alert('Sent: ' + cmd); update(); } catch (e) { alert('Error'); }
-            }
-          </script></body></html>
+          <head>
+            <title>Card Counter Dashboard</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+              body { font-family: Arial; text-align: center; padding: 20px; background: #111; color: white; }
+              h1 { color: #4CAF50; }
+              .stats { margin: 20px auto; font-size: 20px; max-width: 300px; }
+              .stat { background: #222; border-radius: 10px; padding: 12px; margin: 8px 0; }
+              .label { font-size: 12px; color: #888; }
+              .value { font-size: 36px; font-weight: bold; color: #4CAF50; }
+              button { padding: 12px 24px; margin: 8px; background: #4CAF50; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; width: 90%; max-width: 300px; display: block; margin: 8px auto; }
+              button:hover { background: #45a049; }
+              .danger { background: #e53935; }
+              .danger:hover { background: #c62828; }
+              #status { color: #888; font-size: 12px; margin-top: 12px; }
+            </style>
+          </head>
+          <body>
+            <h1>♠ Card Counter</h1>
+            <div class="stats">
+              <div class="stat"><div class="label">TRUE COUNT</div><div class="value" id="trueCount">-</div></div>
+              <div class="stat"><div class="label">RUNNING COUNT</div><div class="value" id="runningCount">-</div></div>
+              <div class="stat"><div class="label">HIGH CARDS LEFT</div><div class="value" id="highLeft">-</div></div>
+              <div class="stat"><div class="label">CARDS SEEN</div><div class="value" id="cardsSeen">-</div></div>
+            </div>
+            <button onclick="trigger('scan cards')">📸 Scan Cards</button>
+            <button onclick="trigger('start streaming')">▶ Start Streaming</button>
+            <button onclick="trigger('stop streaming')">⏹ Stop Streaming</button>
+            <button onclick="trigger('status')">📊 Status</button>
+            <button class="danger" onclick="trigger('new shoe')">🔄 New Shoe</button>
+            <div id="status">Loading...</div>
+            <script>
+              async function update() {
+                try {
+                  const r = await fetch('/stats');
+                  const d = await r.json();
+                  document.getElementById('trueCount').textContent = (d.trueCount >= 0 ? '+' : '') + d.trueCount;
+                  document.getElementById('runningCount').textContent = (d.runningCount >= 0 ? '+' : '') + d.runningCount;
+                  document.getElementById('highLeft').textContent = d.highLeft;
+                  document.getElementById('cardsSeen').textContent = d.cardsSeen;
+                  document.getElementById('status').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+                } catch(e) {
+                  document.getElementById('status').textContent = 'Connection error';
+                }
+              }
+              setInterval(update, 3000);
+              update();
+              async function trigger(cmd) {
+                try {
+                  await fetch('/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: cmd }) });
+                  document.getElementById('status').textContent = 'Sent: ' + cmd;
+                  setTimeout(update, 1000);
+                } catch(e) {
+                  document.getElementById('status').textContent = 'Error sending command';
+                }
+              }
+            </script>
+          </body>
+        </html>
       `);
     });
 
-    // Stats API (assumes one session for demo; add sessionId param for multi)
     app.get('/stats', (req, res) => {
       const state = Array.from(sessionStates.values())[0] || { runningCount: 0, cardsSeen: 0, highSeen: 0, decks: 6, totalHigh: 120 };
-      const decksLeft = state.decks - (state.cardsSeen / 52);
-      const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+      const decksLeft = Math.max(state.decks - (state.cardsSeen / 52), 0.1);
+      const trueCount = Math.round(state.runningCount / decksLeft);
       const highLeft = state.totalHigh - state.highSeen;
-      res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
+      res.json({ trueCount, runningCount: state.runningCount, highLeft, cardsSeen: state.cardsSeen });
     });
 
-    // Action API
     app.post('/action', express.json(), (req, res) => {
       const { command } = req.body;
-      console.log(`Action triggered: ${command}`);
-      // Simulate transcription for first active session
+      console.log(`[ACTION] Triggered: ${command}`);
       const handler = Array.from(transcriptionHandlers.values())[0];
       if (handler) handler({ text: command });
       res.status(200).send('OK');
@@ -88,35 +113,34 @@ class CardCounterApp extends AppServer {
 
     let streamingInterval: NodeJS.Timeout | null = null;
 
-    await session.audio.speak('Ready. Say "scan cards" or "start streaming".');
+    await session.audio.speak('Ready. Say scan cards or start streaming.');
 
     const onTrans = async (data: any) => {
       const text = data.text.toLowerCase().trim();
-      console.log(`[TRANS] Received: ${text} (full data: ${JSON.stringify(data)})`);
+      console.log(`[TRANS] "${text}"`);
 
-      if (text.includes('scan cards')) await this.performScan(session, sessionStates.get(sessionId)!);
-      else if (text.includes('start streaming')) {
-        if (streamingInterval) return await session.audio.speak('Active.');
+      if (text.includes('scan cards')) {
+        await this.performScan(session, sessionStates.get(sessionId)!);
+      } else if (text.includes('start streaming')) {
+        if (streamingInterval) { await session.audio.speak('Already streaming.'); return; }
         await session.audio.speak('Streaming started.');
         streamingInterval = setInterval(() => this.performScan(session, sessionStates.get(sessionId)!), 3000);
       } else if (text.includes('stop streaming')) {
         if (streamingInterval) {
           clearInterval(streamingInterval);
           streamingInterval = null;
-          await session.audio.speak('Stopped.');
+          await session.audio.speak('Streaming stopped.');
         }
       } else if (text.includes('new shoe')) {
         const state = sessionStates.get(sessionId)!;
         state.runningCount = state.cardsSeen = state.highSeen = 0;
-        await session.audio.speak('New shoe.');
+        await session.audio.speak('New shoe started.');
       } else if (text.includes('status')) {
         const state = sessionStates.get(sessionId)!;
-        const decksLeft = state.decks - (state.cardsSeen / 52);
-        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        const decksLeft = Math.max(state.decks - (state.cardsSeen / 52), 0.1);
+        const trueCount = Math.round(state.runningCount / decksLeft);
         const highLeft = state.totalHigh - state.highSeen;
-        await session.audio.speak(`True: ${trueCount}. High: ${highLeft}.`);
-      } else {
-        console.log(`[TRANS] Unrecognized command: ${text}`);
+        await session.audio.speak(`True count ${trueCount}. High cards left ${highLeft}.`);
       }
     };
 
@@ -133,120 +157,77 @@ class CardCounterApp extends AppServer {
 
   private async performScan(session: AppSession, state: any): Promise<void> {
     try {
-      console.log('[SCAN] Starting scan...');
-      const photoPromise = session.camera.requestPhoto();
-      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout')), 60000));
-      const photo = await Promise.race([photoPromise, timeoutPromise]);
+      console.log('[SCAN] Requesting photo...');
+      const photo = await Promise.race([
+        session.camera.requestPhoto(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Photo timeout after 60s')), 60000))
+      ]) as any;
 
-      console.log('[SCAN] Full photo object:', photo);
-      if (photo && typeof photo === "object") {
-        console.log('[SCAN] All photo keys:', Object.keys(photo));
-        for (const key in photo) {
-          if (Object.prototype.hasOwnProperty.call(photo, key)) {
-            console.log(`[SCAN] Key: ${key} typeof:`, typeof photo[key]);
-          }
-        }
-      }
+      console.log('[SCAN] Photo keys:', Object.keys(photo));
 
-      // Try common keys that might contain the raw photo bits:
-      const candidateKeys = ['photoData', 'data', 'buffer', 'bytes'];
-      let rawData: any = null;
-      for (const k of candidateKeys) {
+      // Extract image data from whichever key the SDK uses
+      let imageBase64: string | null = null;
+
+      for (const k of ['photoData', 'data', 'buffer', 'bytes', 'base64', 'image']) {
         if (photo[k]) {
-          rawData = photo[k];
-          console.log(`[SCAN] Using photo.${k} as image data. typeof:`, typeof rawData, 'length:', rawData?.length || rawData?.byteLength);
+          const raw = photo[k];
+          if (Buffer.isBuffer(raw) || raw instanceof Uint8Array || raw instanceof ArrayBuffer) {
+            imageBase64 = Buffer.from(raw).toString('base64');
+          } else if (typeof raw === 'string') {
+            imageBase64 = raw.replace(/^data:image\/\w+;base64,/, '');
+          }
+          console.log(`[SCAN] Image from key "${k}", base64 length: ${imageBase64?.length}`);
           break;
         }
       }
 
-      let imageBase64: string | null = null;
-
-      if (rawData) {
-        // If rawData is a Buffer, ArrayBuffer, or Uint8Array
-        if (Buffer.isBuffer(rawData) || rawData instanceof Uint8Array || rawData instanceof ArrayBuffer) {
-          const imageBuffer = Buffer.from(rawData);
-          imageBase64 = imageBuffer.toString('base64');
-          console.log(`[SCAN] Encoded base64 from photo, length: ${imageBase64.length}`);
-        } else if (typeof rawData === "string") {
-          // Sometimes, it's already a base64 string
-          imageBase64 = rawData.replace(/^data:image\/jpeg;base64,/, "");
-          console.log('[SCAN] Raw image data is a string, using as base64 (first 50 chars):', imageBase64.slice(0,50));
-        } else {
-          throw new Error("Camera photo binary data is in an unrecognized format!");
-        }
-      } else if (photo.base64) {
-        console.log("[SCAN] Found base64 property on photo, using as is.");
-        imageBase64 = photo.base64.replace(/^data:image\/jpeg;base64,/, "");
-      }
-
       if (!imageBase64) {
-        throw new Error("Camera photo has no usable binary/image data!");
+        throw new Error(`No image data found. Photo keys were: ${Object.keys(photo).join(', ')}`);
       }
 
-      const detectedCards = await this.detectCards(imageBase64);
-      console.log(`[SCAN] Detected cards: ${detectedCards ? detectedCards.length : 0}`);
+      const cards = await this.detectCards(imageBase64);
+      console.log(`[SCAN] Detected ${cards.length} cards:`, cards);
 
-      let announcement = '';
-      if (!detectedCards || detectedCards.length === 0) {
-        const decksLeft = state.decks - (state.cardsSeen / 52);
-        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
-        announcement = `No cards. True: ${trueCount}.`;
+      if (cards.length === 0) {
+        const decksLeft = Math.max(state.decks - (state.cardsSeen / 52), 0.1);
+        const trueCount = Math.round(state.runningCount / decksLeft);
+        await session.audio.speak(`No cards detected. True count ${trueCount}.`);
       } else {
-        for (const card of detectedCards) {
-          const rank = card.class.slice(0, -1);
-          const value = this.getCardValue(rank);
-          state.runningCount += value;
+        for (const card of cards) {
+          state.runningCount += this.getCardValue(card.rank);
           state.cardsSeen++;
-          if (['10', 'J', 'Q', 'K', 'A'].includes(rank)) state.highSeen++;
+          if (['10', 'J', 'Q', 'K', 'A'].includes(card.rank)) state.highSeen++;
         }
-        const decksLeft = state.decks - (state.cardsSeen / 52);
-        const trueCount = decksLeft > 0 ? Math.round(state.runningCount / decksLeft) : 0;
+        const decksLeft = Math.max(state.decks - (state.cardsSeen / 52), 0.1);
+        const trueCount = Math.round(state.runningCount / decksLeft);
         const highLeft = state.totalHigh - state.highSeen;
-        announcement = `Detected ${detectedCards.length}. Running: ${state.runningCount}. True: ${trueCount}. High: ${highLeft}.`;
+        await session.audio.speak(`${cards.length} cards. Running ${state.runningCount}. True ${trueCount}. High left ${highLeft}.`);
       }
-      await session.audio.speak(announcement);
-      console.log('[SCAN] Announcement:', announcement);
 
     } catch (error: any) {
-      if (error && error.response && error.response.data) {
-        console.error('[SCAN] Error (Roboflow API response):', JSON.stringify(error.response.data));
-      } else {
-        console.error('[SCAN] Error:', error.stack || error.message || error);
-      }
-      await session.audio.speak('Scan error. Retry.');
+      console.error('[SCAN] Error:', error.message);
+      await session.audio.speak('Scan error. Please retry.');
     }
   }
 
   private async detectCards(imageBase64: string): Promise<any[]> {
-    const apiKey = process.env.ROBOFLOW_API_KEY;
-    const modelId = 'yakovs-workspace-vkezy/active-learning-10'; // Updated to the full workflow ID
-
     try {
-      const response = await axios.post(`https://detect.roboflow.com/${modelId}`, imageBase64, {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        params: { api_key: apiKey }
-      });
-      console.log('Roboflow:', response.data.predictions);
-      return response.data.predictions.filter((p: any) => p.confidence > 0.5);
-    } catch (error) {
-      console.error('Roboflow fail:', error);
+      console.log('[DETECT] Sending to Base44...');
+      const response = await axios.post(
+        BASE44_WEBHOOK_URL,
+        { imageBase64: `data:image/jpeg;base64,${imageBase64}` },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'x-webhook-secret': GLASS_WEBHOOK_SECRET
+          },
+          timeout: 30000
+        }
+      );
+      console.log('[DETECT] Base44 response:', response.data);
+      return response.data?.cards || [];
+    } catch (error: any) {
+      console.error('[DETECT] Base44 error:', error.message);
       return [];
     }
-  }
-
-  private getCardValue(rank: string): number {
-    if (['2', '3', '4', '5', '6'].includes(rank)) return 1;
-    if (['7', '8', '9'].includes(rank)) return 0;
-    return -1;
-  }
-}
-
-const port = Number(process.env.PORT) || 8080;
-const server = new CardCounterApp({
-  packageName: 'com.yakov.cardcounter',
-  apiKey: process.env.MENTRA_API_KEY!,
-  port,
-  host: '0.0.0.0'
-});
-
-server.start().then(() => console.log(`On port ${port}`)).catch(err => { console.error(err); process.exit(1); });
+  
