@@ -97,11 +97,17 @@ class CardCounterApp extends AppServer {
       else if (text.includes('start streaming')) {
         if (streamingInterval) return await session.audio.speak('Active.');
         await session.audio.speak('Streaming started.');
-        streamingInterval = setInterval(() => this.performScan(session, sessionStates.get(sessionId)!), 3000);
+        console.log('[STREAM] Starting interval for session:', sessionId);
+        await this.performScan(session, sessionStates.get(sessionId)!); // Immediate scan
+        streamingInterval = setInterval(async () => {
+          console.log('[STREAM] Interval scan for session:', sessionId);
+          await this.performScan(session, sessionStates.get(sessionId)!);
+        }, 3000);
       } else if (text.includes('stop streaming')) {
         if (streamingInterval) {
           clearInterval(streamingInterval);
           streamingInterval = null;
+          console.log('[STREAM] Stopped interval for session:', sessionId);
           await session.audio.speak('Stopped.');
         }
       } else if (text.includes('new shoe')) {
@@ -123,7 +129,10 @@ class CardCounterApp extends AppServer {
     transcriptionHandlers.set(sessionId, onTrans);
 
     this.addCleanupHandler(() => {
-      if (streamingInterval) clearInterval(streamingInterval);
+      if (streamingInterval) {
+        clearInterval(streamingInterval);
+        console.log('[STREAM] Cleanup: Stopped interval for session:', sessionId);
+      }
       sessionStates.delete(sessionId);
       transcriptionHandlers.delete(sessionId);
       console.log(`[SESSION] Cleanup: ${sessionId}`);
@@ -186,6 +195,7 @@ class CardCounterApp extends AppServer {
       console.log('[SCAN] Length of base64 image: ' + imageBase64.length);
       const detectedCards = await this.detectCards(imageBase64);
       console.log(`[SCAN] Detected cards: ${detectedCards ? detectedCards.length : 0}`);
+      console.log('[SCAN] Raw detected cards:', JSON.stringify(detectedCards));
 
       let announcement = '';
       if (!detectedCards || detectedCards.length === 0) {
