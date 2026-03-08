@@ -20,8 +20,14 @@ class CardCounterApp extends AppServer {
     app.get('/health', (req, res) => res.status(200).send('OK - Card Counter running!'));
 
     app.post('/webhook', (req, res) => {
-      console.log('Webhook:', req.body);
-      res.status(200).send('OK');
+      try {
+        console.log('Webhook:', JSON.stringify(req.body)); // Safe JSON log
+        // Process if needed
+        res.status(200).send('OK');
+      } catch (err) {
+        console.error('Webhook error:', err);
+        res.status(500).send('Error');
+      }
     });
 
     // Dashboard webview
@@ -127,6 +133,14 @@ class CardCounterApp extends AppServer {
 
     session.events.onTranscription(onTrans);
     transcriptionHandlers.set(sessionId, onTrans);
+
+    session.events.onDisconnected(() => {
+      console.log('[SESSION] Disconnected:', sessionId, ' - Cleaning up streaming');
+      if (streamingInterval) {
+        clearInterval(streamingInterval);
+        streamingInterval = null;
+      }
+    });
 
     this.addCleanupHandler(() => {
       if (streamingInterval) {
