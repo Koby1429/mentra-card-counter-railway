@@ -21,7 +21,10 @@ interface DetectedCard {
 
 const sessionStates = new Map<string, SessionState>();
 const transcriptionHandlers = new Map<string, (data: any) => void>();
-let pendingCommand: string | null = null; // queues commands that arrive before session is ready
+const activeSessions = new Map<string, AppSession>();
+let pendingCommand: string | null = null;
+let globalStreamingInterval: NodeJS.Timeout | null = null;
+let isGlobalScanning = false;
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -47,77 +50,129 @@ class CardCounterApp extends AppServer {
         <!DOCTYPE html>
         <html>
           <head>
-            <title>Card Counter Dashboard</title>
+            <title>Card Counter</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-              body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #1a1a2e; color: #eee; }
-              h1 { color: #4CAF50; }
-              .stats { margin: 20px auto; font-size: 20px; max-width: 300px; }
-              .stat { background: #16213e; border-radius: 8px; padding: 12px; margin: 8px 0; }
+              * { box-sizing: border-box; margin: 0; padding: 0; }
+              body { font-family: Arial, sans-serif; text-align: center; padding: 16px; background: #1a1a2e; color: #eee; }
+              h1 { color: #4CAF50; font-size: 24px; margin-bottom: 4px; }
+              .stats { margin: 12px auto; max-width: 320px; }
+              .stat { background: #16213e; border-radius: 10px; padding: 10px 14px; margin: 6px 0; display: flex; justify-content: space-between; align-items: center; }
               .label { color: #aaa; font-size: 14px; }
-              .value { font-size: 28px; font-weight: bold; color: #4CAF50; }
-              .buttons { margin-top: 20px; }
-              button { padding: 10px 20px; margin: 6px; background: #4CAF50; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 15px; }
-              button:hover { background: #45a049; }
-              button.danger { background: #e53935; }
-              button.danger:hover { background: #c62828; }
-              #connStatus { font-size: 14px; margin: 8px 0; }
+              .value { font-size: 26px; font-weight: bold; color: #4CAF50; }
+              .value.negative { color: #e53935; }
+              #connStatus { font-size: 13px; margin: 8px 0; }
+              #feedback { min-height: 20px; font-size: 13px; color: #aaa; margin: 6px 0; }
+              .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 320px; margin: 10px auto; }
+              button { padding: 14px 10px; background: #4CAF50; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: bold; width: 100%; }
+              button:active { opacity: 0.8; }
+              button.blue { background: #1565C0; }
+              button.red { background: #e53935; }
+              button.orange { background: #e65100; }
+              button:disabled { background: #555; cursor: not-allowed; }
             </style>
           </head>
           <body>
             <h1>🃏 Card Counter</h1>
-            <p>Stats refresh every 5 seconds</p>
+            <p id="connStatus">Checking...</p>
             <div class="stats">
-              <div class="stat"><div class="label">True Count</div><div class="value" id="trueCount">—</div></div>
-              <div class="stat"><div class="label">High Cards Left</div><div class="value" id="highLeft">—</div></div>
-              <div class="stat"><div class="label">Cards Seen</div><div class="value" id="cardsSeen">—</div></div>
+              <div class="stat"><span class="label">True Count</span><span class="value" id="trueCount">—</span></div>
+              <div class="stat"><span class="label">Running Count</span><span class="value" id="runningCount">—</span></div>
+              <div class="stat"><span class="label">High Cards Left</span><span class="value" id="highLeft">—</span></div>
+              <div class="stat"><span class="label">Cards Seen</span><span class="value" id="cardsSeen">—</span></div>
             </div>
-            <p id="connStatus">Checking connection...</p>
-            <div class="buttons">
-              <button onclick="trigger('scan cards')">📷 Scan</button>
-              <button onclick="trigger('start streaming')">▶ Start Stream</button>
-              <button onclick="trigger('stop streaming')">⏹ Stop Stream</button>
-              <button onclick="trigger('status')">📊 Status</button>
-              <button class="danger" onclick="trigger('new shoe')">🔄 New Shoe</button>
+            <p id="feedback">Ready</p>
+            <div class="grid">
+              <button id="btnScan" onclick="doScan()">📷 Scan</button>
+              <button id="btnStream" class="blue" onclick="toggleStream()">▶ Start Stream</button>
+              <button class="orange" onclick="doAction('status')">📊 Status</button>
+              <button class="red" onclick="doNewShoe()">🔄 New Shoe</button>
             </div>
             <script>
+              let streaming = false;
+
               async function update() {
                 try {
                   const r = await fetch('/stats');
                   const d = await r.json();
-                  document.getElementById('trueCount').textContent = d.trueCount;
-                  document.getElementById('highLeft').textContent = d.highLeft;
-                  document.getElementById('cardsSeen').textContent = d.cardsSeen;
-                } catch (e) { console.error('Stats fetch error:', e); }
+                  document.getElementById('trueCount').textContent = d.trueCount ?? '—';
+                  document.getElementById('runningCount').textContent = d.runningCount ?? '—';
+                  document.getElementById('highLeft').textContent = d.highLeft ?? '—';
+                  document.getElementById('cardsSeen').textContent = d.cardsSeen ?? '—';
+                  const tc = document.getElementById('trueCount');
+                  tc.className = 'value' + (d.trueCount > 0 ? '' : d.trueCount < 0 ? ' negative' : '');
+                } catch (e) {}
               }
-              setInterval(update, 5000);
-              update();
 
-              async function checkConnection() {
+              async function checkConn() {
                 try {
                   const r = await fetch('/session-status');
                   const d = await r.json();
                   const el = document.getElementById('connStatus');
-                  el.textContent = d.connected ? '🟢 Glasses Connected' : '🔴 Glasses Not Connected';
+                  el.textContent = d.connected ? '🟢 Glasses Connected' : '🔴 Glasses Disconnected';
                   el.style.color = d.connected ? '#4CAF50' : '#e53935';
                 } catch(e) {}
               }
-              setInterval(checkConnection, 3000);
-              checkConnection();
 
-              async function trigger(cmd) {
-                try {
-                  const r = await fetch('/action', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command: cmd })
-                  });
-                  const d = await r.json();
-                  if (r.status === 202) {
-                    document.getElementById('connStatus').textContent = '⏳ Queued — waiting for glasses to connect...';
-                  }
-                  setTimeout(update, 500);
-                } catch (e) { alert('Error sending command: ' + cmd); }
+              async function post(endpoint, body) {
+                const r = await fetch(endpoint, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(body)
+                });
+                return r.json();
               }
+
+              async function doScan() {
+                const btn = document.getElementById('btnScan');
+                btn.disabled = true;
+                btn.textContent = '⏳ Scanning...';
+                setFeedback('Capturing image...');
+                try {
+                  const d = await post('/action/scan', {});
+                  setFeedback(d.message || 'Scan complete');
+                  setTimeout(update, 300);
+                } catch(e) { setFeedback('Error: ' + e.message); }
+                btn.disabled = false;
+                btn.textContent = '📷 Scan';
+              }
+
+              async function toggleStream() {
+                const btn = document.getElementById('btnStream');
+                if (!streaming) {
+                  streaming = true;
+                  btn.textContent = '⏹ Stop Stream';
+                  btn.className = 'red';
+                  setFeedback('Streaming started...');
+                  await post('/action/stream/start', {});
+                } else {
+                  streaming = false;
+                  btn.textContent = '▶ Start Stream';
+                  btn.className = 'blue';
+                  setFeedback('Streaming stopped');
+                  await post('/action/stream/stop', {});
+                }
+              }
+
+              async function doNewShoe() {
+                if (!confirm('Reset count for new shoe?')) return;
+                await post('/action/new-shoe', {});
+                setFeedback('New shoe — count reset');
+                setTimeout(update, 300);
+              }
+
+              async function doAction(cmd) {
+                await post('/action', { command: cmd });
+              }
+
+              function setFeedback(msg) {
+                document.getElementById('feedback').textContent = msg;
+              }
+
+              setInterval(update, 3000);
+              setInterval(checkConn, 3000);
+              update();
+              checkConn();
             </script>
           </body>
         </html>
@@ -136,7 +191,7 @@ class CardCounterApp extends AppServer {
       const decksLeft = Math.max(state.decks - state.cardsSeen / 52, 0.5);
       const trueCount = Math.round(state.runningCount / decksLeft);
       const highLeft = state.totalHigh - state.highSeen;
-      res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
+      res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen, runningCount: state.runningCount });
     });
 
     // Session status — lets webview know if glasses are connected
@@ -144,22 +199,62 @@ class CardCounterApp extends AppServer {
       res.json({ connected: transcriptionHandlers.size > 0 });
     });
 
-    // Action trigger from webview buttons
+    // Dedicated REST endpoints for webview buttons (no voice needed)
+    const getSession = () => Array.from(activeSessions.values())[0] ?? null;
+    const getState = () => Array.from(sessionStates.values())[0] ?? null;
+
+    app.post('/action/scan', async (_req, res) => {
+      const session = getSession();
+      const state = getState();
+      if (!session || !state) return res.status(503).json({ message: 'Glasses not connected' });
+      if (isGlobalScanning) return res.status(429).json({ message: 'Scan already in progress' });
+      console.log('[ACTION] Scan triggered from webview');
+      // Run async, respond immediately so webview doesnt time out
+      this.performScan(session, state).catch(e => console.error('[ACTION] Scan error:', e));
+      res.json({ message: 'Scan started' });
+    });
+
+    app.post('/action/stream/start', (_req, res) => {
+      const session = getSession();
+      const state = getState();
+      if (!session || !state) return res.status(503).json({ message: 'Glasses not connected' });
+      if (globalStreamingInterval) return res.json({ message: 'Already streaming' });
+      console.log('[ACTION] Stream start triggered from webview');
+      globalStreamingInterval = setInterval(async () => {
+        if (!isGlobalScanning) await this.performScan(session, state).catch(() => {});
+      }, 4000);
+      res.json({ message: 'Streaming started' });
+    });
+
+    app.post('/action/stream/stop', (_req, res) => {
+      if (globalStreamingInterval) {
+        clearInterval(globalStreamingInterval);
+        globalStreamingInterval = null;
+      }
+      console.log('[ACTION] Stream stop triggered from webview');
+      res.json({ message: 'Streaming stopped' });
+    });
+
+    app.post('/action/new-shoe', (_req, res) => {
+      const state = getState();
+      if (state) {
+        state.runningCount = 0;
+        state.cardsSeen = 0;
+        state.highSeen = 0;
+      }
+      if (globalStreamingInterval) {
+        clearInterval(globalStreamingInterval);
+        globalStreamingInterval = null;
+      }
+      console.log('[ACTION] New shoe reset');
+      res.json({ message: 'Count reset' });
+    });
+
+    // Legacy action endpoint (kept for compatibility)
     app.post('/action', (req, res) => {
       const { command } = req.body;
-      if (!command || typeof command !== 'string') {
-        return res.status(400).send('Missing command');
-      }
-      console.log(`[ACTION] Triggered: ${command}`);
-      const handler = Array.from(transcriptionHandlers.values())[0];
-      if (handler) {
-        handler({ text: command });
-        res.status(200).json({ status: 'ok' });
-      } else {
-        pendingCommand = command;
-        console.warn(`[ACTION] No session yet, queued: "${command}"`);
-        res.status(202).json({ status: 'queued', message: 'Glasses not connected yet. Will run when connected.' });
-      }
+      console.log(`[ACTION] Legacy command: ${command}`);
+      res.json({ status: 'ok' });
     });
   }
 
@@ -168,6 +263,7 @@ class CardCounterApp extends AppServer {
   protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
     console.log(`[SESSION] Started: ${sessionId} (user: ${userId})`);
 
+    activeSessions.set(sessionId, session);
     sessionStates.set(sessionId, {
       runningCount: 0,
       cardsSeen: 0,
@@ -289,6 +385,7 @@ class CardCounterApp extends AppServer {
       }
       sessionStates.delete(sessionId);
       transcriptionHandlers.delete(sessionId);
+      activeSessions.delete(sessionId);
       console.log(`[SESSION] Cleaned up: ${sessionId}`);
     };
 
@@ -302,7 +399,17 @@ class CardCounterApp extends AppServer {
   // ─── Scan Logic ─────────────────────────────────────────────────────────────
 
   private async performScan(session: AppSession, state: SessionState): Promise<void> {
-    console.log('[SCAN] Starting video stream to capture frame...');
+    if (isGlobalScanning) { console.log('[SCAN] Already scanning, skipping'); return; }
+    isGlobalScanning = true;
+    console.log('[SCAN] Starting...');
+    try {
+      await this._performScanInner(session, state);
+    } finally {
+      isGlobalScanning = false;
+    }
+  }
+
+  private async _performScanInner(session: AppSession, state: SessionState): Promise<void> {
 
     // Extract base64 from a frame object (handles multiple SDK data shapes)
     const extractBase64 = (frame: any): string | null => {
@@ -338,27 +445,44 @@ class CardCounterApp extends AppServer {
     let imageBase64: string | null = null;
 
     try {
-      imageBase64 = await new Promise<string>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('Stream timeout 20s')), 20000);
+      // Log every method on camera so we know exactly what's available
+      const cam = session.camera as any;
+      const proto = Object.getOwnPropertyNames(Object.getPrototypeOf(cam));
+      const own = Object.keys(cam);
+      console.log('[SCAN] camera proto methods:', proto.join(', '));
+      console.log('[SCAN] camera own keys:', own.join(', '));
 
-        // Log available stream methods
-        console.log('[SCAN] camera methods:', Object.getOwnPropertyNames(
-          Object.getPrototypeOf(session.camera)).join(', '));
-
-        // Start video stream, grab first frame, stop
-        const unsub = session.camera.onFrame((frame: any) => {
-          clearTimeout(timeout);
-          unsub?.();
-          session.camera.stopVideoStream?.().catch(() => {});
-          const b64 = extractBase64(frame);
-          if (b64) resolve(b64);
-          else reject(new Error('Could not extract image data from frame'));
+      // Try each possible API in order
+      if (typeof cam.onFrame === 'function') {
+        console.log('[SCAN] Using onFrame API');
+        imageBase64 = await new Promise<string>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('onFrame timeout 15s')), 15000);
+          const unsub = cam.onFrame((frame: any) => {
+            clearTimeout(timeout);
+            try { unsub?.(); } catch (_) {}
+            try { cam.stopVideoStream?.(); } catch (_) {}
+            const b64 = extractBase64(frame);
+            b64 ? resolve(b64) : reject(new Error('extractBase64 returned null'));
+          });
+          try { cam.startVideoStream?.({ fps: 1 }); } catch (_) {}
         });
 
-        session.camera.startVideoStream?.({ fps: 1 });
-      });
+      } else if (typeof cam.requestPhoto === 'function') {
+        console.log('[SCAN] Using requestPhoto API');
+        const photo = await Promise.race([
+          cam.requestPhoto(),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('requestPhoto timeout 15s')), 15000))
+        ]);
+        imageBase64 = extractBase64(photo);
+
+      } else {
+        console.error('[SCAN] No known camera method found on:', proto.join(', '));
+        await session.audio.speak('Camera not supported. Please update the app.');
+        return;
+      }
+
     } catch (err: any) {
-      console.error('[SCAN] Frame capture failed:', err.message);
+      console.error('[SCAN] Camera capture failed:', err.message);
       await session.audio.speak('Camera error. Please retry.');
       return;
     }
