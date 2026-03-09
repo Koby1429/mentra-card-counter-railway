@@ -183,9 +183,27 @@ class CardCounterApp extends AppServer {
     // ─── Transcription Handler ──────────────────────────────────────────────
     // IMPORTANT: Handler registered BEFORE speak() so SDK sends correct subscriptions
 
+    // Mute window: ignore transcription for N ms after we speak (prevents TTS echo)
+    let mutedUntil = 0;
+    const MUTE_DURATION_MS = 4000;
+    const speakAndMute = async (msg: string) => {
+      mutedUntil = Date.now() + MUTE_DURATION_MS;
+      await session.audio.speak(msg);
+    };
+
     const onTrans = async (data: any) => {
+      // Only act on final transcription results, not partials
+      if (data?.isFinal === false) return;
+
       const text: string = (data?.text ?? '').toLowerCase().trim();
       if (!text) return;
+
+      // Ignore if we're in the mute window (glasses echoing our own TTS)
+      if (Date.now() < mutedUntil) {
+        console.log(`[TRANS] Muted (TTS echo): "${text}"`);
+        return;
+      }
+
       console.log(`[TRANS] "${text}"`);
 
       const state = sessionStates.get(sessionId);
@@ -193,37 +211,38 @@ class CardCounterApp extends AppServer {
 
       if (text.includes('scan cards')) {
         await this.performScan(session, state);
+        mutedUntil = Date.now() + 8000; // scan TTS can be long
 
       } else if (text.includes('start streaming')) {
         if (streamingInterval) {
-          await session.audio.speak('Already streaming.');
+          await speakAndMute('Already streaming.');
           return;
         }
-        await session.audio.speak('Streaming started.');
+        await speakAndMute('Streaming started.');
         streamingInterval = setInterval(async () => {
-          if (!isScanning) await this.performScan(session, state);
+          if (!isScanning) { await this.performScan(session, state); mutedUntil = Date.now() + 8000; }
         }, 3000);
 
       } else if (text.includes('stop streaming')) {
         if (streamingInterval) {
           clearInterval(streamingInterval);
           streamingInterval = null;
-          await session.audio.speak('Streaming stopped.');
+          await speakAndMute('Streaming stopped.');
         } else {
-          await session.audio.speak('Not currently streaming.');
+          await speakAndMute('Not currently streaming.');
         }
 
       } else if (text.includes('new shoe')) {
         state.runningCount = 0;
         state.cardsSeen = 0;
         state.highSeen = 0;
-        await session.audio.speak('New shoe started. Count reset.');
+        await speakAndMute('New shoe started. Count reset.');
 
       } else if (text.includes('status')) {
         const decksLeft = Math.max(state.decks - state.cardsSeen / 52, 0.5);
         const trueCount = Math.round(state.runningCount / decksLeft);
         const highLeft = state.totalHigh - state.highSeen;
-        await session.audio.speak(
+        await speakAndMute(
           `Running count ${state.runningCount}. True count ${trueCount}. High cards left: ${highLeft}. Cards seen: ${state.cardsSeen}.`
         );
 
@@ -238,8 +257,18 @@ class CardCounterApp extends AppServer {
     transcriptionHandlers.set(sessionId, onTrans);
     console.log(`[SESSION] Handler registered for ${sessionId}`);
 
-    // Small delay to let WebSocket stabilize (fixes switching_clouds audio timeout)
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    // Wait for session to stabilize (switching_clouds causes rapid reconnects)
+    // We wait longer to let Mentra settle on one cloud region
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Only speak if this session is still the active one
+    const currentState = sessionStates.get(sessionId);
+    if (!currentState) {
+      console.log(`[SESSION] ${sessionId} was replaced before stabilization, skipping speak`);
+      return;
+    }
+
+    mutedUntil = Date.now() + MUTE_DURATION_MS;
     await session.audio.speak('Card counter ready. Say scan cards or start streaming.');
 
 
@@ -277,11 +306,23 @@ class CardCounterApp extends AppServer {
     let photo: any;
 
     try {
-      const photoPromise = session.camera.requestPhoto();
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Photo capture timed out after 60s')), 60000)
-      );
-      photo = await Promise.race([photoPromise, timeoutPromise]);
+      // Use event listener pattern — requestPhoto() promise never resolves on this SDK version.
+      // Instead: register a one-shot onPhotoTaken listener, then trigger the capture.
+      photo = await new Promise<any>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Photo capture timed out after 20s'));
+        }, 20000);
+
+        // One-shot listener: fires on next photo taken
+        const unsub = session.camera.onPhotoTaken((p: any) => {
+          clearTimeout(timeout);
+          unsub?.(); // unsubscribe after first photo
+          resolve(p);
+        });
+
+        // Trigger the capture
+        session.camera.requestPhoto().catch(() => {}); // ignore promise, we use the event
+      });
     } catch (err: any) {
       console.error('[SCAN] Photo capture failed:', err.message);
       await session.audio.speak('Camera error. Please retry.');
@@ -449,7 +490,11 @@ const server = new CardCounterApp({
   packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
   port,
-  host: '0.0.0.0'
+  host: '0.0.0.0',
+  // Tell the SDK we need transcription before session starts
+  // so it sends the correct subscriptions at CONNECTION_ACK time
+  requiredPermissions: ['microphone'],
+  subscriptions: ['transcription'],
 });
 
 server.start()
