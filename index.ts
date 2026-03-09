@@ -538,27 +538,34 @@ class CardCounterApp extends AppServer {
       },
       body: JSON.stringify({
         model: 'claude-opus-4-6',
-        max_tokens: 1024,
+        max_tokens: 2048,
+        system: `You are an expert playing card identifier with perfect vision. You specialize in reading playing cards from photos taken at various angles and qualities. You are extremely careful about distinguishing similar-looking cards:
+- 9 vs 6: count the pips carefully
+- 4 vs A: look at the corner index
+- Q vs 0/10: letters vs numbers
+- Suit colors: red = hearts/diamonds, black = spades/clubs
+- Diamond ♦ vs Heart ♥: diamond is a sharp rhombus, heart has a curved top
+You never guess — you only report cards you can actually identify. If a card is too blurry or obscured to identify both rank AND suit with confidence, skip it.`,
         messages: [{
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 } },
-            { type: 'text', text: `You are a card counting assistant analyzing a photo taken from smart glasses at a blackjack or poker table.
+            { type: 'text', text: `Look at this photo carefully and identify every playing card you can see.
 
-Your job: identify EVERY playing card visible in the image — including partially visible cards, overlapping cards, and cards at the edges.
+Step 1: Count how many cards are visible (including partially covered ones).
+Step 2: For each card, read the rank and suit from the corner index (the small number/letter and suit symbol in the corner).
+Step 3: Double-check each card — especially 9 vs 6 (rotate if needed), and red suits (heart vs diamond).
 
-Scan the ENTIRE image systematically:
-- Top-left to bottom-right
-- Look for card corners, suits symbols (♠♥♦♣), and rank numbers/letters
-- Include cards that are partially cut off as long as you can identify the rank AND suit
-- Do NOT skip cards that are partially covered by other cards — look for exposed corners
+IMPORTANT RULES:
+- Read the corner index (top-left or bottom-right of each card) — that's the most reliable
+- A card showing "9" with red pips is NINE, not TEN
+- A card showing "5" is FIVE, not SIX
+- Hearts (♥) have a curved top split; Diamonds (♦) are pointy rhombuses
+- Only include cards where you are confident of BOTH rank AND suit
 
-Rank must be exactly one of: A, 2, 3, 4, 5, 6, 7, 8, 9, 10, J, Q, K
-Suit must be exactly one of: spades, hearts, diamonds, clubs
-
-Respond ONLY with valid JSON. No explanation, no markdown, no extra text.
-Format: {"cards": [{"rank": "A", "suit": "spades"}, {"rank": "10", "suit": "hearts"}]}
-If no playing cards are visible: {"cards": []}` }
+Respond with ONLY this JSON (no explanation, no markdown):
+{"cards": [{"rank": "A", "suit": "spades"}, {"rank": "9", "suit": "hearts"}]}
+If no cards visible: {"cards": []}` }
           ]
         }]
       })
