@@ -1,15 +1,16 @@
-{
-  "name": "mentra-card-counter",
-  "version": "1.0.0",
-  "main": "index.ts",
-  "type": "module",
-  "scripts": {
-    "start": "bun index.ts"
-  },
-  "dependencies": {
-    "@mentra/sdk": "^2.1.29",
-    "dotenv": "^16.4.5",
-    "express": "^4.18.2",
-    "axios": "^1.6.7"
-  }
+"scripts": {
+  "start": "bun index.ts",
+  "dev": "bun --watch index.ts"
 }
+```
+
+`--watch` auto-restarts on file changes, which is handy during development.
+
+---
+
+**The main thing to verify before running:** make sure you have a `.env` file in the same folder with these keys:
+```
+MENTRA_API_KEY=your_key_here
+BASE44_WEBHOOK_URL=https://your-base44-webhook-url
+GLASS_WEBHOOK_SECRET=your_secret_here
+PORT=8080
