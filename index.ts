@@ -1,7 +1,6 @@
 import { AppServer, AppSession } from '@mentra/sdk';
 import * as dotenv from 'dotenv';
 import express from 'express';
-import axios from 'axios';
 
 dotenv.config();
 
@@ -15,8 +14,14 @@ interface SessionState {
   totalHigh: number;
 }
 
+interface DetectedCard {
+  rank: string;
+  suit: string;
+}
+
 const sessionStates = new Map<string, SessionState>();
 const transcriptionHandlers = new Map<string, (data: any) => void>();
+let pendingCommand: string | null = null; // queues commands that arrive before session is ready
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -55,6 +60,7 @@ class CardCounterApp extends AppServer {
               button:hover { background: #45a049; }
               button.danger { background: #e53935; }
               button.danger:hover { background: #c62828; }
+              #connStatus { font-size: 14px; margin: 8px 0; }
             </style>
           </head>
           <body>
@@ -65,6 +71,7 @@ class CardCounterApp extends AppServer {
               <div class="stat"><div class="label">High Cards Left</div><div class="value" id="highLeft">—</div></div>
               <div class="stat"><div class="label">Cards Seen</div><div class="value" id="cardsSeen">—</div></div>
             </div>
+            <p id="connStatus">Checking connection...</p>
             <div class="buttons">
               <button onclick="trigger('scan cards')">📷 Scan</button>
               <button onclick="trigger('start streaming')">▶ Start Stream</button>
@@ -85,14 +92,30 @@ class CardCounterApp extends AppServer {
               setInterval(update, 5000);
               update();
 
+              async function checkConnection() {
+                try {
+                  const r = await fetch('/session-status');
+                  const d = await r.json();
+                  const el = document.getElementById('connStatus');
+                  el.textContent = d.connected ? '🟢 Glasses Connected' : '🔴 Glasses Not Connected';
+                  el.style.color = d.connected ? '#4CAF50' : '#e53935';
+                } catch(e) {}
+              }
+              setInterval(checkConnection, 3000);
+              checkConnection();
+
               async function trigger(cmd) {
                 try {
-                  await fetch('/action', {
+                  const r = await fetch('/action', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ command: cmd })
                   });
-                  setTimeout(update, 500); // refresh stats after action
+                  const d = await r.json();
+                  if (r.status === 202) {
+                    document.getElementById('connStatus').textContent = '⏳ Queued — waiting for glasses to connect...';
+                  }
+                  setTimeout(update, 500);
                 } catch (e) { alert('Error sending command: ' + cmd); }
               }
             </script>
@@ -101,7 +124,7 @@ class CardCounterApp extends AppServer {
       `);
     });
 
-    // Stats endpoint — FIX: returns zeroed state if no session yet
+    // Stats endpoint
     app.get('/stats', (_req, res) => {
       const state: SessionState = Array.from(sessionStates.values())[0] ?? {
         runningCount: 0,
@@ -116,6 +139,11 @@ class CardCounterApp extends AppServer {
       res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen });
     });
 
+    // Session status — lets webview know if glasses are connected
+    app.get('/session-status', (_req, res) => {
+      res.json({ connected: transcriptionHandlers.size > 0 });
+    });
+
     // Action trigger from webview buttons
     app.post('/action', (req, res) => {
       const { command } = req.body;
@@ -126,10 +154,12 @@ class CardCounterApp extends AppServer {
       const handler = Array.from(transcriptionHandlers.values())[0];
       if (handler) {
         handler({ text: command });
+        res.status(200).json({ status: 'ok' });
       } else {
-        console.warn('[ACTION] No active session handler found');
+        pendingCommand = command;
+        console.warn(`[ACTION] No session yet, queued: "${command}"`);
+        res.status(202).json({ status: 'queued', message: 'Glasses not connected yet. Will run when connected.' });
       }
-      res.status(200).send('OK');
     });
   }
 
@@ -138,17 +168,16 @@ class CardCounterApp extends AppServer {
   protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
     console.log(`[SESSION] Started: ${sessionId} (user: ${userId})`);
 
-    // Initialize state for this session
     sessionStates.set(sessionId, {
       runningCount: 0,
       cardsSeen: 0,
       highSeen: 0,
       decks: 6,
-      totalHigh: 120  // 6 decks × 20 high cards (10, J, Q, K, A per suit)
+      totalHigh: 120  // 6 decks × 20 high cards (10, J, Q, K, A × 4 suits × 6 decks)
     });
 
     let streamingInterval: NodeJS.Timeout | null = null;
-    let isScanning = false; // FIX: prevent overlapping scans during streaming
+    let isScanning = false;
 
     await session.audio.speak('Card counter ready. Say scan cards or start streaming.');
 
@@ -206,9 +235,16 @@ class CardCounterApp extends AppServer {
     session.events.onTranscription(onTrans);
     transcriptionHandlers.set(sessionId, onTrans);
 
+    // Fire any command that was queued before the session was ready
+    if (pendingCommand) {
+      const cmd = pendingCommand;
+      pendingCommand = null;
+      console.log(`[SESSION] Executing queued command: "${cmd}"`);
+      setTimeout(() => onTrans({ text: cmd }), 500);
+    }
+
     // ─── Cleanup ────────────────────────────────────────────────────────────
 
-    // FIX: cleanup is scoped correctly to this session
     const cleanup = () => {
       if (streamingInterval) {
         clearInterval(streamingInterval);
@@ -219,7 +255,6 @@ class CardCounterApp extends AppServer {
       console.log(`[SESSION] Cleaned up: ${sessionId}`);
     };
 
-    // Listen for session end if SDK supports it; fallback to process exit
     if (typeof (session as any).onEnd === 'function') {
       (session as any).onEnd(cleanup);
     } else {
@@ -234,7 +269,6 @@ class CardCounterApp extends AppServer {
     let photo: any;
 
     try {
-      // FIX: null-safe photo capture with timeout
       const photoPromise = session.camera.requestPhoto();
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Photo capture timed out after 60s')), 60000)
@@ -246,7 +280,6 @@ class CardCounterApp extends AppServer {
       return;
     }
 
-    // FIX: null check before accessing keys
     if (!photo || typeof photo !== 'object') {
       console.error('[SCAN] Photo is null or not an object:', photo);
       await session.audio.speak('No photo received. Please retry.');
@@ -255,10 +288,10 @@ class CardCounterApp extends AppServer {
 
     console.log('[SCAN] Photo keys:', Object.keys(photo));
 
-    // Extract base64 image data from whichever key the SDK uses
+    // Extract base64 from whichever key the SDK provides
     let imageBase64: string | null = null;
-
     const candidateKeys = ['photoData', 'data', 'buffer', 'bytes', 'base64'];
+
     for (const k of candidateKeys) {
       const val = photo[k];
       if (!val) continue;
@@ -280,8 +313,8 @@ class CardCounterApp extends AppServer {
       return;
     }
 
-    // Send to Base44 for card detection
-    let detectedCards: any[] = [];
+    // Detect cards via Claude Vision
+    let detectedCards: DetectedCard[] = [];
     try {
       detectedCards = await this.detectCards(imageBase64);
       console.log(`[SCAN] Cards detected: ${detectedCards.length}`);
@@ -291,10 +324,9 @@ class CardCounterApp extends AppServer {
       return;
     }
 
-    // Update state and announce result
-    const decksLeft = Math.max(state.decks - state.cardsSeen / 52, 0.5);
-
+    // Update state and announce
     if (detectedCards.length === 0) {
+      const decksLeft = Math.max(state.decks - state.cardsSeen / 52, 0.5);
       const trueCount = Math.round(state.runningCount / decksLeft);
       await session.audio.speak(`No cards detected. True count: ${trueCount}.`);
     } else {
@@ -312,46 +344,92 @@ class CardCounterApp extends AppServer {
     }
   }
 
-  // ─── Base44 Integration ─────────────────────────────────────────────────────
+  // ─── Claude Vision Card Detection ──────────────────────────────────────────
 
-  private async detectCards(imageBase64: string): Promise<any[]> {
-    const webhookUrl = process.env.BASE44_WEBHOOK_URL;
-    const webhookSecret = process.env.GLASS_WEBHOOK_SECRET;
+  private async detectCards(imageBase64: string): Promise<DetectedCard[]> {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
 
-    if (!webhookUrl || !webhookSecret) {
-      console.error('[BASE44] BASE44_WEBHOOK_URL or GLASS_WEBHOOK_SECRET not set in .env');
+    if (!apiKey) {
+      console.error('[CLAUDE] ANTHROPIC_API_KEY not set in .env');
       return [];
     }
 
-    console.log('[BASE44] Calling endpoint:', webhookUrl);
-    console.log('[BASE44] Image size (base64 chars):', imageBase64.length);
+    console.log('[CLAUDE] Sending image to Claude Vision, base64 length:', imageBase64.length);
 
-    const response = await axios.post(
-      webhookUrl,
-      { imageBase64: `data:image/jpeg;base64,${imageBase64}` },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'x-webhook-secret': webhookSecret
-        },
-        timeout: 60000
-      }
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-opus-4-6',
+        max_tokens: 1024,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/jpeg',
+                  data: imageBase64
+                }
+              },
+              {
+                type: 'text',
+                text: `Look at this image and identify every playing card visible.
+For each card return its rank and suit.
+Rank must be one of: A, 2, 3, 4, 5, 6, 7, 8, 9, 10, J, Q, K
+Suit must be one of: spades, hearts, diamonds, clubs
+
+Respond ONLY with valid JSON — no explanation, no markdown, no extra text.
+Format: {"cards": [{"rank": "A", "suit": "spades"}, {"rank": "10", "suit": "hearts"}]}
+If no playing cards are visible respond: {"cards": []}`
+              }
+            ]
+          }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('[CLAUDE] API error:', response.status, errText);
+      throw new Error(`Claude API returned ${response.status}: ${errText}`);
+    }
+
+    const data = await response.json();
+    console.log('[CLAUDE] Raw response:', JSON.stringify(data));
+
+    // Extract text from response
+    const text = (data.content ?? [])
+      .filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('');
+
+    console.log('[CLAUDE] Extracted text:', text);
+
+    // Strip any accidental markdown fences and parse JSON
+    const clean = text.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    const cards: DetectedCard[] = (parsed.cards ?? []).filter(
+      (c: any) => typeof c.rank === 'string' && typeof c.suit === 'string'
     );
 
-    console.log('[BASE44] Response status:', response.status);
-    console.log('[BASE44] Response data:', JSON.stringify(response.data));
-
-    // FIX: safe access with fallback, filter by confidence threshold
-    const cards = response.data?.cards ?? [];
-    return cards.filter((c: any) => typeof c.confidence === 'number' && c.confidence > 0.6);
+    console.log('[CLAUDE] Parsed cards:', JSON.stringify(cards));
+    return cards;
   }
 
   // ─── Hi-Lo Card Value ───────────────────────────────────────────────────────
 
   private getCardValue(rank: string): number {
-    if (['2', '3', '4', '5', '6'].includes(rank)) return 1;   // low cards
+    if (['2', '3', '4', '5', '6'].includes(rank)) return 1;   // low  → count up
     if (['7', '8', '9'].includes(rank)) return 0;              // neutral
-    return -1;                                                  // 10, J, Q, K, A
+    return -1;                                                  // 10, J, Q, K, A → count down
   }
 }
 
