@@ -437,10 +437,10 @@ class CardCounterApp extends AppServer {
       }
     };
 
-    // Take 3 photos and merge results for better coverage
+    // Take a single photo
     let frames: string[] = [];
     try {
-      frames = await this.captureMultipleFrames(session, 3);
+      frames = await this.captureMultipleFrames(session, 1);
     } catch (err: any) {
       console.error('[SCAN] Capture failed:', err.message);
       await safeSpeak('Camera error. Please retry.');
@@ -448,18 +448,15 @@ class CardCounterApp extends AppServer {
     }
 
     if (frames.length === 0) {
-      await safeSpeak('No photos captured. Please retry.');
+      await safeSpeak('No photo captured. Please retry.');
       return;
     }
 
-    console.log(`[SCAN] Captured ${frames.length} frames, sending to Claude Vision...`);
-
-    // Detect cards in all frames in parallel, then merge
+    // Detect cards via Claude Vision
     let detectedCards: DetectedCard[] = [];
     try {
-      const allResults = await Promise.all(frames.map(f => this.detectCards(f)));
-      detectedCards = this.mergeCardResults(allResults);
-      console.log(`[SCAN] Final card count after merge: ${detectedCards.length}`);
+      detectedCards = await this.detectCards(frames[0]);
+      console.log(`[SCAN] Cards detected: ${detectedCards.length}`);
     } catch (err: any) {
       console.error('[SCAN] detectCards threw:', err.message);
       await safeSpeak('Detection error. Please retry.');
