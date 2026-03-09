@@ -302,65 +302,73 @@ class CardCounterApp extends AppServer {
   // ─── Scan Logic ─────────────────────────────────────────────────────────────
 
   private async performScan(session: AppSession, state: SessionState): Promise<void> {
-    console.log('[SCAN] Requesting photo...');
-    let photo: any;
+    console.log('[SCAN] Starting video stream to capture frame...');
+
+    // Extract base64 from a frame object (handles multiple SDK data shapes)
+    const extractBase64 = (frame: any): string | null => {
+      if (!frame) return null;
+      console.log('[SCAN] Frame type:', typeof frame, '| keys:', 
+        typeof frame === 'object' ? Object.keys(frame).join(', ') : 'n/a');
+
+      // Raw Buffer / Uint8Array / ArrayBuffer
+      if (Buffer.isBuffer(frame) || frame instanceof Uint8Array || frame instanceof ArrayBuffer) {
+        return Buffer.from(frame).toString('base64');
+      }
+      // Plain base64 string
+      if (typeof frame === 'string') {
+        return frame.replace(/^data:image\/\w+;base64,/, '');
+      }
+      // Object with a data field
+      const candidateKeys = ['jpegData', 'data', 'buffer', 'bytes', 'base64', 'photoData', 'image'];
+      for (const k of candidateKeys) {
+        const val = frame[k];
+        if (!val) continue;
+        if (Buffer.isBuffer(val) || val instanceof Uint8Array || val instanceof ArrayBuffer) {
+          console.log(\`[SCAN] Got buffer from frame.\${k}\`);
+          return Buffer.from(val).toString('base64');
+        }
+        if (typeof val === 'string') {
+          console.log(\`[SCAN] Got string from frame.\${k}\`);
+          return val.replace(/^data:image\/\w+;base64,/, '');
+        }
+      }
+      return null;
+    };
+
+    let imageBase64: string | null = null;
 
     try {
-      // Use event listener pattern — requestPhoto() promise never resolves on this SDK version.
-      // Instead: register a one-shot onPhotoTaken listener, then trigger the capture.
-      photo = await new Promise<any>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Photo capture timed out after 20s'));
-        }, 20000);
+      imageBase64 = await new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Stream timeout 20s')), 20000);
 
-        // One-shot listener: fires on next photo taken
-        const unsub = session.camera.onPhotoTaken((p: any) => {
+        // Log available stream methods
+        console.log('[SCAN] camera methods:', Object.getOwnPropertyNames(
+          Object.getPrototypeOf(session.camera)).join(', '));
+
+        // Start video stream, grab first frame, stop
+        const unsub = session.camera.onFrame((frame: any) => {
           clearTimeout(timeout);
-          unsub?.(); // unsubscribe after first photo
-          resolve(p);
+          unsub?.();
+          session.camera.stopVideoStream?.().catch(() => {});
+          const b64 = extractBase64(frame);
+          if (b64) resolve(b64);
+          else reject(new Error('Could not extract image data from frame'));
         });
 
-        // Trigger the capture
-        session.camera.requestPhoto().catch(() => {}); // ignore promise, we use the event
+        session.camera.startVideoStream?.({ fps: 1 });
       });
     } catch (err: any) {
-      console.error('[SCAN] Photo capture failed:', err.message);
+      console.error('[SCAN] Frame capture failed:', err.message);
       await session.audio.speak('Camera error. Please retry.');
       return;
     }
 
-    if (!photo || typeof photo !== 'object') {
-      console.error('[SCAN] Photo is null or not an object:', photo);
-      await session.audio.speak('No photo received. Please retry.');
-      return;
-    }
-
-    console.log('[SCAN] Photo keys:', Object.keys(photo));
-
-    // Extract base64 from whichever key the SDK provides
-    let imageBase64: string | null = null;
-    const candidateKeys = ['photoData', 'data', 'buffer', 'bytes', 'base64'];
-
-    for (const k of candidateKeys) {
-      const val = photo[k];
-      if (!val) continue;
-
-      if (Buffer.isBuffer(val) || val instanceof Uint8Array || val instanceof ArrayBuffer) {
-        imageBase64 = Buffer.from(val).toString('base64');
-        console.log(`[SCAN] Encoded base64 from photo.${k}, length: ${imageBase64.length}`);
-        break;
-      } else if (typeof val === 'string') {
-        imageBase64 = val.replace(/^data:image\/\w+;base64,/, '');
-        console.log(`[SCAN] Using string from photo.${k}, length: ${imageBase64.length}`);
-        break;
-      }
-    }
-
     if (!imageBase64) {
-      console.error('[SCAN] Could not extract image data. Available keys:', Object.keys(photo));
-      await session.audio.speak('Could not read photo data. Please retry.');
+      await session.audio.speak('No image data received. Please retry.');
       return;
     }
+
+    console.log('[SCAN] Got frame, base64 length:', imageBase64.length);
 
     // Detect cards via Claude Vision
     let detectedCards: DetectedCard[] = [];
