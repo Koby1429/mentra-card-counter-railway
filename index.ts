@@ -179,9 +179,9 @@ class CardCounterApp extends AppServer {
     let streamingInterval: NodeJS.Timeout | null = null;
     let isScanning = false;
 
-    await session.audio.speak('Card counter ready. Say scan cards or start streaming.');
 
     // ─── Transcription Handler ──────────────────────────────────────────────
+    // IMPORTANT: Handler registered BEFORE speak() so SDK sends correct subscriptions
 
     const onTrans = async (data: any) => {
       const text: string = (data?.text ?? '').toLowerCase().trim();
@@ -232,8 +232,16 @@ class CardCounterApp extends AppServer {
       }
     };
 
+
+    // CRITICAL FIX: Register BEFORE speak so SDK sends transcription subscription
     session.events.onTranscription(onTrans);
     transcriptionHandlers.set(sessionId, onTrans);
+    console.log(`[SESSION] Handler registered for ${sessionId}`);
+
+    // Small delay to let WebSocket stabilize (fixes switching_clouds audio timeout)
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    await session.audio.speak('Card counter ready. Say scan cards or start streaming.');
+
 
     // Fire any command that was queued before the session was ready
     if (pendingCommand) {
