@@ -316,7 +316,7 @@ class CardCounterApp extends AppServer {
       }
       // Plain base64 string
       if (typeof frame === 'string') {
-        return frame.replace(/^data:image\/\w+;base64,/, '');
+        return frame.startsWith('data:') ? frame.split(',')[1] : frame;
       }
       // Object with a data field
       const candidateKeys = ['jpegData', 'data', 'buffer', 'bytes', 'base64', 'photoData', 'image'];
@@ -324,12 +324,12 @@ class CardCounterApp extends AppServer {
         const val = frame[k];
         if (!val) continue;
         if (Buffer.isBuffer(val) || val instanceof Uint8Array || val instanceof ArrayBuffer) {
-          console.log(\`[SCAN] Got buffer from frame.\${k}\`);
+          console.log(`[SCAN] Got buffer from frame.${k}`);
           return Buffer.from(val).toString('base64');
         }
         if (typeof val === 'string') {
-          console.log(\`[SCAN] Got string from frame.\${k}\`);
-          return val.replace(/^data:image\/\w+;base64,/, '');
+          console.log(`[SCAN] Got string from frame.${k}`);
+          return val.startsWith('data:') ? val.split(',')[1] : val;
         }
       }
       return null;
