@@ -284,7 +284,14 @@ class CardCounterApp extends AppServer {
     const MUTE_DURATION_MS = 4000;
     const speakAndMute = async (msg: string) => {
       mutedUntil = Date.now() + MUTE_DURATION_MS;
-      await session.audio.speak(msg);
+      try {
+        await Promise.race([
+          session.audio.speak(msg),
+          new Promise<void>((_, reject) => setTimeout(() => reject(new Error('speak timeout')), 5000))
+        ]);
+      } catch (e: any) {
+        console.warn('[SPEAK] Timed out or failed:', e.message);
+      }
     };
 
     const onTrans = async (data: any) => {
@@ -365,7 +372,14 @@ class CardCounterApp extends AppServer {
     }
 
     mutedUntil = Date.now() + MUTE_DURATION_MS;
-    await session.audio.speak('Card counter ready. Say scan cards or start streaming.');
+    try {
+      await Promise.race([
+        session.audio.speak('Card counter ready.'),
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('speak timeout')), 5000))
+      ]);
+    } catch (e: any) {
+      console.warn('[SPEAK] Ready message failed:', e.message);
+    }
 
 
     // Fire any command that was queued before the session was ready
@@ -411,97 +425,44 @@ class CardCounterApp extends AppServer {
 
   private async _performScanInner(session: AppSession, state: SessionState): Promise<void> {
 
-    // Extract base64 from a frame object (handles multiple SDK data shapes)
-    const extractBase64 = (frame: any): string | null => {
-      if (!frame) return null;
-      console.log('[SCAN] Frame type:', typeof frame, '| keys:', 
-        typeof frame === 'object' ? Object.keys(frame).join(', ') : 'n/a');
-
-      // Raw Buffer / Uint8Array / ArrayBuffer
-      if (Buffer.isBuffer(frame) || frame instanceof Uint8Array || frame instanceof ArrayBuffer) {
-        return Buffer.from(frame).toString('base64');
+    // Never let a speak() hang — if it times out, just log and continue
+    const safeSpeak = async (msg: string) => {
+      try {
+        await Promise.race([
+          safeSpeak(msg),
+          new Promise<void>((_, reject) => setTimeout(() => reject(new Error('speak timeout')), 5000))
+        ]);
+      } catch (e: any) {
+        console.warn('[SPEAK] Timed out or failed:', e.message);
       }
-      // Plain base64 string
-      if (typeof frame === 'string') {
-        return frame.startsWith('data:') ? frame.split(',')[1] : frame;
-      }
-      // Object with a data field
-      const candidateKeys = ['jpegData', 'data', 'buffer', 'bytes', 'base64', 'photoData', 'image'];
-      for (const k of candidateKeys) {
-        const val = frame[k];
-        if (!val) continue;
-        if (Buffer.isBuffer(val) || val instanceof Uint8Array || val instanceof ArrayBuffer) {
-          console.log(`[SCAN] Got buffer from frame.${k}`);
-          return Buffer.from(val).toString('base64');
-        }
-        if (typeof val === 'string') {
-          console.log(`[SCAN] Got string from frame.${k}`);
-          return val.startsWith('data:') ? val.split(',')[1] : val;
-        }
-      }
-      return null;
     };
 
-    let imageBase64: string | null = null;
-
+    // Take 3 photos and merge results for better coverage
+    let frames: string[] = [];
     try {
-      // Log every method on camera so we know exactly what's available
-      const cam = session.camera as any;
-      const proto = Object.getOwnPropertyNames(Object.getPrototypeOf(cam));
-      const own = Object.keys(cam);
-      console.log('[SCAN] camera proto methods:', proto.join(', '));
-      console.log('[SCAN] camera own keys:', own.join(', '));
-
-      // Try each possible API in order
-      if (typeof cam.onFrame === 'function') {
-        console.log('[SCAN] Using onFrame API');
-        imageBase64 = await new Promise<string>((resolve, reject) => {
-          const timeout = setTimeout(() => reject(new Error('onFrame timeout 15s')), 15000);
-          const unsub = cam.onFrame((frame: any) => {
-            clearTimeout(timeout);
-            try { unsub?.(); } catch (_) {}
-            try { cam.stopVideoStream?.(); } catch (_) {}
-            const b64 = extractBase64(frame);
-            b64 ? resolve(b64) : reject(new Error('extractBase64 returned null'));
-          });
-          try { cam.startVideoStream?.({ fps: 1 }); } catch (_) {}
-        });
-
-      } else if (typeof cam.requestPhoto === 'function') {
-        console.log('[SCAN] Using requestPhoto API');
-        const photo = await Promise.race([
-          cam.requestPhoto(),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('requestPhoto timeout 15s')), 15000))
-        ]);
-        imageBase64 = extractBase64(photo);
-
-      } else {
-        console.error('[SCAN] No known camera method found on:', proto.join(', '));
-        await session.audio.speak('Camera not supported. Please update the app.');
-        return;
-      }
-
+      frames = await this.captureMultipleFrames(session, 3);
     } catch (err: any) {
-      console.error('[SCAN] Camera capture failed:', err.message);
-      await session.audio.speak('Camera error. Please retry.');
+      console.error('[SCAN] Capture failed:', err.message);
+      await safeSpeak('Camera error. Please retry.');
       return;
     }
 
-    if (!imageBase64) {
-      await session.audio.speak('No image data received. Please retry.');
+    if (frames.length === 0) {
+      await safeSpeak('No photos captured. Please retry.');
       return;
     }
 
-    console.log('[SCAN] Got frame, base64 length:', imageBase64.length);
+    console.log(`[SCAN] Captured ${frames.length} frames, sending to Claude Vision...`);
 
-    // Detect cards via Claude Vision
+    // Detect cards in all frames in parallel, then merge
     let detectedCards: DetectedCard[] = [];
     try {
-      detectedCards = await this.detectCards(imageBase64);
-      console.log(`[SCAN] Cards detected: ${detectedCards.length}`);
+      const allResults = await Promise.all(frames.map(f => this.detectCards(f)));
+      detectedCards = this.mergeCardResults(allResults);
+      console.log(`[SCAN] Final card count after merge: ${detectedCards.length}`);
     } catch (err: any) {
       console.error('[SCAN] detectCards threw:', err.message);
-      await session.audio.speak('Detection error. Please retry.');
+      await safeSpeak('Detection error. Please retry.');
       return;
     }
 
@@ -509,7 +470,7 @@ class CardCounterApp extends AppServer {
     if (detectedCards.length === 0) {
       const decksLeft = Math.max(state.decks - state.cardsSeen / 52, 0.5);
       const trueCount = Math.round(state.runningCount / decksLeft);
-      await session.audio.speak(`No cards detected. True count: ${trueCount}.`);
+      await safeSpeak(`No cards detected. True count: ${trueCount}.`);
     } else {
       for (const card of detectedCards) {
         state.runningCount += this.getCardValue(card.rank);
@@ -519,23 +480,57 @@ class CardCounterApp extends AppServer {
       const newDecksLeft = Math.max(state.decks - state.cardsSeen / 52, 0.5);
       const trueCount = Math.round(state.runningCount / newDecksLeft);
       const highLeft = state.totalHigh - state.highSeen;
-      await session.audio.speak(
+      await safeSpeak(
         `Detected ${detectedCards.length} card${detectedCards.length > 1 ? 's' : ''}. Running: ${state.runningCount}. True: ${trueCount}. High left: ${highLeft}.`
       );
     }
+  }
+
+  // ─── Multi-shot capture: take 3 photos, merge & deduplicate results ──────────
+
+  private async captureMultipleFrames(session: AppSession, count: number): Promise<string[]> {
+    const frames: string[] = [];
+    for (let i = 0; i < count; i++) {
+      try {
+        const photo = await Promise.race([
+          (session.camera as any).requestPhoto(),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('photo timeout')), 12000))
+        ]);
+        const b64 = this.extractBase64FromPhoto(photo);
+        if (b64) {
+          frames.push(b64);
+          console.log(`[SCAN] Frame ${i + 1}/${count} captured, length: ${b64.length}`);
+        }
+      } catch (e: any) {
+        console.warn(`[SCAN] Frame ${i + 1} failed:`, e.message);
+      }
+      // Small delay between shots so glasses can reframe slightly
+      if (i < count - 1) await new Promise(r => setTimeout(r, 800));
+    }
+    return frames;
+  }
+
+  private extractBase64FromPhoto(photo: any): string | null {
+    if (!photo) return null;
+    if (Buffer.isBuffer(photo) || photo instanceof Uint8Array) return Buffer.from(photo).toString('base64');
+    if (typeof photo === 'string') return photo.startsWith('data:') ? photo.split(',')[1] : photo;
+    const keys = ['buffer', 'jpegData', 'data', 'bytes', 'base64', 'photoData', 'image'];
+    for (const k of keys) {
+      const val = photo[k];
+      if (!val) continue;
+      if (Buffer.isBuffer(val) || val instanceof Uint8Array) return Buffer.from(val).toString('base64');
+      if (typeof val === 'string') return val.startsWith('data:') ? val.split(',')[1] : val;
+    }
+    return null;
   }
 
   // ─── Claude Vision Card Detection ──────────────────────────────────────────
 
   private async detectCards(imageBase64: string): Promise<DetectedCard[]> {
     const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) { console.error('[CLAUDE] No API key'); return []; }
 
-    if (!apiKey) {
-      console.error('[CLAUDE] ANTHROPIC_API_KEY not set in .env');
-      return [];
-    }
-
-    console.log('[CLAUDE] Sending image to Claude Vision, base64 length:', imageBase64.length);
+    console.log('[CLAUDE] Sending image, base64 length:', imageBase64.length);
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -547,32 +542,28 @@ class CardCounterApp extends AppServer {
       body: JSON.stringify({
         model: 'claude-opus-4-6',
         max_tokens: 1024,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: 'image/jpeg',
-                  data: imageBase64
-                }
-              },
-              {
-                type: 'text',
-                text: `Look at this image and identify every playing card visible.
-For each card return its rank and suit.
-Rank must be one of: A, 2, 3, 4, 5, 6, 7, 8, 9, 10, J, Q, K
-Suit must be one of: spades, hearts, diamonds, clubs
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 } },
+            { type: 'text', text: `You are a card counting assistant analyzing a photo taken from smart glasses at a blackjack or poker table.
 
-Respond ONLY with valid JSON — no explanation, no markdown, no extra text.
+Your job: identify EVERY playing card visible in the image — including partially visible cards, overlapping cards, and cards at the edges.
+
+Scan the ENTIRE image systematically:
+- Top-left to bottom-right
+- Look for card corners, suits symbols (♠♥♦♣), and rank numbers/letters
+- Include cards that are partially cut off as long as you can identify the rank AND suit
+- Do NOT skip cards that are partially covered by other cards — look for exposed corners
+
+Rank must be exactly one of: A, 2, 3, 4, 5, 6, 7, 8, 9, 10, J, Q, K
+Suit must be exactly one of: spades, hearts, diamonds, clubs
+
+Respond ONLY with valid JSON. No explanation, no markdown, no extra text.
 Format: {"cards": [{"rank": "A", "suit": "spades"}, {"rank": "10", "suit": "hearts"}]}
-If no playing cards are visible respond: {"cards": []}`
-              }
-            ]
-          }
-        ]
+If no playing cards are visible: {"cards": []}` }
+          ]
+        }]
       })
     });
 
@@ -583,26 +574,41 @@ If no playing cards are visible respond: {"cards": []}`
     }
 
     const data = await response.json();
-    console.log('[CLAUDE] Raw response:', JSON.stringify(data));
+    const text = (data.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
+    console.log('[CLAUDE] Response:', text);
 
-    // Extract text from response
-    const text = (data.content ?? [])
-      .filter((b: any) => b.type === 'text')
-      .map((b: any) => b.text)
-      .join('');
-
-    console.log('[CLAUDE] Extracted text:', text);
-
-    // Strip any accidental markdown fences and parse JSON
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
-
     const cards: DetectedCard[] = (parsed.cards ?? []).filter(
       (c: any) => typeof c.rank === 'string' && typeof c.suit === 'string'
     );
-
     console.log('[CLAUDE] Parsed cards:', JSON.stringify(cards));
     return cards;
+  }
+
+  // ─── Deduplicate cards across multiple scan results ───────────────────────
+
+  private mergeCardResults(allResults: DetectedCard[][]): DetectedCard[] {
+    // Use the result with the most cards as the base, then add any unique cards from others
+    if (allResults.length === 0) return [];
+    
+    // Sort by card count descending — most complete scan first
+    const sorted = [...allResults].sort((a, b) => b.length - a.length);
+    const merged: DetectedCard[] = [...sorted[0]];
+
+    for (let i = 1; i < sorted.length; i++) {
+      for (const card of sorted[i]) {
+        // Add card only if this exact rank+suit combo isn't already in merged
+        const isDuplicate = merged.some(c => c.rank === card.rank && c.suit === card.suit);
+        if (!isDuplicate) {
+          merged.push(card);
+          console.log(`[MERGE] Added from scan ${i + 1}: ${card.rank} of ${card.suit}`);
+        }
+      }
+    }
+
+    console.log(`[MERGE] Final: ${merged.length} cards from ${allResults.map(r => r.length).join('+')} across ${allResults.length} shots`);
+    return merged;
   }
 
   // ─── Hi-Lo Card Value ───────────────────────────────────────────────────────
