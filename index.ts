@@ -429,7 +429,7 @@ class CardCounterApp extends AppServer {
     const safeSpeak = async (msg: string) => {
       try {
         await Promise.race([
-          safeSpeak(msg),
+          session.audio.speak(msg),
           new Promise<void>((_, reject) => setTimeout(() => reject(new Error('speak timeout')), 5000))
         ]);
       } catch (e: any) {
@@ -491,7 +491,7 @@ class CardCounterApp extends AppServer {
       try {
         const photo = await Promise.race([
           (session.camera as any).requestPhoto(),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('photo timeout')), 12000))
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('photo timeout')), 8000))
         ]);
         const b64 = this.extractBase64FromPhoto(photo);
         if (b64) {
@@ -537,8 +537,8 @@ class CardCounterApp extends AppServer {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-opus-4-6',
-        max_tokens: 2048,
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 256,
         system: `You are an expert playing card identifier with perfect vision. You specialize in reading playing cards from photos taken at various angles and qualities. You are extremely careful about distinguishing similar-looking cards:
 - 9 vs 6: count the pips carefully
 - 4 vs A: look at the corner index
