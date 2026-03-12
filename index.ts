@@ -1,411 +1,406 @@
 import { AppServer, AppSession } from '@mentra/sdk';
 import * as dotenv from 'dotenv';
 import express from 'express';
-import sharp from 'sharp';
 
 dotenv.config();
 
-const activeSessions = new Map<string, AppSession>();
-let isCapturing = false;
-let isSearching = false;
-let pendingPhoto: { base64: string; enhanced: string; sizeKB: number } | null = null;
+// ─── Session State ────────────────────────────────────────────────────────────
 
-class FaceAnalyzerApp extends AppServer {
+interface SessionState {
+  runningCount: number;
+  cardsSeen: number;
+  highSeen: number;
+  decks: number;
+  totalHigh: number;
+}
+
+interface DetectedCard {
+  rank: string;
+  suit: string;
+}
+
+const sessionStates = new Map<string, SessionState>();
+const transcriptionHandlers = new Map<string, (data: any) => void>();
+const activeSessions = new Map<string, AppSession>();
+let pendingCommand: string | null = null;
+let globalStreamingInterval: NodeJS.Timeout | null = null;
+let isGlobalScanning = false;
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+
+class CardCounterApp extends AppServer {
   constructor(options: any) {
     super(options);
 
     const app = this.getExpressApp();
     app.use(express.json());
 
-    // ── Health ──────────────────────────────────────────────────────────────
-    app.get('/health', (_req, res) => res.status(200).send('OK - Face Search running!'));
+    // Health check
+    app.get('/health', (_req, res) => res.status(200).send('OK - Card Counter running!'));
 
-    // ── Session status ──────────────────────────────────────────────────────
-    app.get('/session-status', (_req, res) => {
-      res.json({ connected: activeSessions.size > 0 });
+    // Webhook receiver
+    app.post('/webhook', (req, res) => {
+      console.log('Webhook received:', req.body);
+      res.status(200).send('OK');
     });
 
-    // ── Webview ─────────────────────────────────────────────────────────────
+    // Dashboard webview
     app.get('/webview', (_req, res) => {
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.status(200).send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Face Search</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: Arial, sans-serif;
-      text-align: center;
-      padding: 16px;
-      background: #1a1a2e;
-      color: #eee;
-      min-height: 100vh;
-    }
-    h1 { color: #4CAF50; font-size: 22px; margin-bottom: 4px; }
-    #connStatus { font-size: 13px; margin: 4px 0 8px; }
-    #feedback  { font-size: 13px; color: #aaa; min-height: 18px; margin: 6px 0; }
-    #feedback2 { font-size: 13px; color: #aaa; min-height: 18px; margin: 4px 0; }
+      res.status(200).send(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Card Counter</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+              * { box-sizing: border-box; margin: 0; padding: 0; }
+              body { font-family: Arial, sans-serif; text-align: center; padding: 16px; background: #1a1a2e; color: #eee; }
+              h1 { color: #4CAF50; font-size: 24px; margin-bottom: 4px; }
+              .stats { margin: 12px auto; max-width: 320px; }
+              .stat { background: #16213e; border-radius: 10px; padding: 10px 14px; margin: 6px 0; display: flex; justify-content: space-between; align-items: center; }
+              .label { color: #aaa; font-size: 14px; }
+              .value { font-size: 26px; font-weight: bold; color: #4CAF50; }
+              .value.negative { color: #e53935; }
+              #connStatus { font-size: 13px; margin: 8px 0; }
+              #feedback { min-height: 20px; font-size: 13px; color: #aaa; margin: 6px 0; }
+              .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 320px; margin: 10px auto; }
+              button { padding: 14px 10px; background: #4CAF50; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: bold; width: 100%; }
+              button:active { opacity: 0.8; }
+              button.blue { background: #1565C0; }
+              button.red { background: #e53935; }
+              button.orange { background: #e65100; }
+              button:disabled { background: #555; cursor: not-allowed; }
+            </style>
+          </head>
+          <body>
+            <h1>🃏 Card Counter</h1>
+            <p id="connStatus">Checking...</p>
+            <div class="stats">
+              <div class="stat"><span class="label">True Count</span><span class="value" id="trueCount">—</span></div>
+              <div class="stat"><span class="label">Running Count</span><span class="value" id="runningCount">—</span></div>
+              <div class="stat"><span class="label">High Cards Left</span><span class="value" id="highLeft">—</span></div>
+              <div class="stat"><span class="label">Cards Seen</span><span class="value" id="cardsSeen">—</span></div>
+            </div>
+            <p id="feedback">Ready</p>
+            <div class="grid">
+              <button id="btnScan" onclick="doScan()">📷 Scan</button>
+              <button id="btnStream" class="blue" onclick="toggleStream()">▶ Start Stream</button>
+              <button class="orange" onclick="doAction('status')">📊 Status</button>
+              <button class="red" onclick="doNewShoe()">🔄 New Shoe</button>
+            </div>
+            <script>
+              let streaming = false;
 
-    .btn {
-      width: 100%; max-width: 340px; padding: 16px;
-      margin: 6px auto; display: block;
-      border: none; border-radius: 10px;
-      cursor: pointer; font-size: 17px; font-weight: bold;
-    }
-    .btn:disabled { background: #555 !important; cursor: not-allowed; }
-    #btnCapture   { background: #4CAF50; color: #fff; }
-    #btnConfirm   { background: #1976D2; color: #fff; display: none; }
-    #btnRetake    { background: #c0392b; color: #fff; display: none; }
-    #btnNewSearch { background: #37474F; color: #fff; display: none; margin-top: 12px; }
+              async function update() {
+                try {
+                  const r = await fetch('/stats');
+                  const d = await r.json();
+                  document.getElementById('trueCount').textContent = d.trueCount ?? '—';
+                  document.getElementById('runningCount').textContent = d.runningCount ?? '—';
+                  document.getElementById('highLeft').textContent = d.highLeft ?? '—';
+                  document.getElementById('cardsSeen').textContent = d.cardsSeen ?? '—';
+                  const tc = document.getElementById('trueCount');
+                  tc.className = 'value' + (d.trueCount > 0 ? '' : d.trueCount < 0 ? ' negative' : '');
+                } catch (e) {}
+              }
 
-    #previewSection {
-      display: none; max-width: 360px;
-      margin: 12px auto; text-align: left;
-    }
-    #previewImg {
-      width: 100%; border-radius: 10px;
-      border: 3px solid #4CAF50; display: block;
-    }
-    #qualityLabel { font-size: 12px; color: #aaa; margin: 10px 0 4px; }
-    #qualityTrack { background: #333; border-radius: 6px; height: 10px; overflow: hidden; }
-    #qualityFill  { height: 100%; border-radius: 6px; transition: width 0.4s, background 0.4s; width: 0%; }
-    #qualityText  { font-size: 14px; font-weight: bold; margin: 6px 0; }
+              async function checkConn() {
+                try {
+                  const r = await fetch('/session-status');
+                  const d = await r.json();
+                  const el = document.getElementById('connStatus');
+                  el.textContent = d.connected ? '🟢 Glasses Connected' : '🔴 Glasses Disconnected';
+                  el.style.color = d.connected ? '#4CAF50' : '#e53935';
+                } catch(e) {}
+              }
 
-    #progressBar {
-      width: 100%; max-width: 340px; margin: 6px auto;
-      background: #333; border-radius: 6px;
-      overflow: hidden; height: 10px; display: none;
-    }
-    #progressFill { height: 100%; background: #4CAF50; width: 0%; transition: width 0.4s; }
+              async function post(endpoint, body) {
+                const r = await fetch(endpoint, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(body)
+                });
+                return r.json();
+              }
 
-    .results { max-width: 360px; margin: 12px auto; text-align: left; }
-    .result-card { background: #16213e; border-radius: 10px; padding: 14px; margin: 10px 0; overflow: hidden; }
-    .result-title { color: #4CAF50; font-weight: bold; font-size: 15px; margin-bottom: 8px; }
-    .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #2a2a4a; font-size: 13px; }
-    .row:last-child { border-bottom: none; }
-    .lbl { color: #aaa; min-width: 50px; }
-    .val { color: #eee; font-weight: bold; text-align: right; word-break: break-all; }
-    .val a { color: #4CAF50; text-decoration: none; }
-    .score-bar { height: 6px; border-radius: 3px; background: #4CAF50; margin: 4px 0 8px; }
-    .thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; float: right; margin-left: 10px; }
-    .no-results { color: #aaa; font-size: 14px; padding: 20px; text-align: center; }
-  </style>
-</head>
-<body>
-  <h1>&#128269; Face Search</h1>
-  <p id="connStatus">Checking...</p>
-  <p id="feedback">Point glasses at a face, then press Capture</p>
+              async function doScan() {
+                const btn = document.getElementById('btnScan');
+                btn.disabled = true;
+                btn.textContent = '⏳ Scanning...';
+                setFeedback('Capturing image...');
+                try {
+                  const d = await post('/action/scan', {});
+                  setFeedback(d.message || 'Scan complete');
+                  setTimeout(update, 300);
+                } catch(e) { setFeedback('Error: ' + e.message); }
+                btn.disabled = false;
+                btn.textContent = '📷 Scan';
+              }
 
-  <button id="btnCapture" class="btn" onclick="doCapture()">&#128247; Capture Photo</button>
+              async function toggleStream() {
+                const btn = document.getElementById('btnStream');
+                if (!streaming) {
+                  streaming = true;
+                  btn.textContent = '⏹ Stop Stream';
+                  btn.className = 'red';
+                  setFeedback('Streaming started...');
+                  await post('/action/stream/start', {});
+                } else {
+                  streaming = false;
+                  btn.textContent = '▶ Start Stream';
+                  btn.className = 'blue';
+                  setFeedback('Streaming stopped');
+                  await post('/action/stream/stop', {});
+                }
+              }
 
-  <div id="previewSection">
-    <img id="previewImg" src="" alt="Captured photo" />
-    <div id="qualityLabel">Image Quality</div>
-    <div id="qualityTrack"><div id="qualityFill"></div></div>
-    <div id="qualityText"></div>
-  </div>
+              async function doNewShoe() {
+                if (!confirm('Reset count for new shoe?')) return;
+                await post('/action/new-shoe', {});
+                setFeedback('New shoe — count reset');
+                setTimeout(update, 300);
+              }
 
-  <button id="btnConfirm"   class="btn" onclick="doConfirm()">&#9989; Looks Good &#8212; Search!</button>
-  <button id="btnRetake"    class="btn" onclick="doRetake()">&#128260; Retake Photo</button>
+              async function doAction(cmd) {
+                await post('/action', { command: cmd });
+              }
 
-  <div id="progressBar"><div id="progressFill"></div></div>
-  <p id="feedback2"></p>
+              function setFeedback(msg) {
+                document.getElementById('feedback').textContent = msg;
+              }
 
-  <div class="results" id="results"></div>
-  <button id="btnNewSearch" class="btn" onclick="resetUI()">&#128247; New Search</button>
-
-  <script>
-    function el(id) { return document.getElementById(id); }
-    function setFb(msg)  { el('feedback').textContent  = msg; }
-    function setFb2(msg) { el('feedback2').textContent = msg; }
-
-    function showProgress(on) {
-      el('progressBar').style.display = on ? 'block' : 'none';
-      if (!on) el('progressFill').style.width = '0%';
-    }
-    function setProgress(pct) { el('progressFill').style.width = pct + '%'; }
-
-    function showPreview(base64, sizeKB, quality) {
-      el('previewImg').src = 'data:image/jpeg;base64,' + base64;
-      el('previewSection').style.display = 'block';
-
-      var pct  = Math.min(100, Math.max(0, quality));
-      var fill = el('qualityFill');
-      fill.style.width      = pct + '%';
-      fill.style.background = pct >= 70 ? '#4CAF50' : pct >= 40 ? '#FFA500' : '#e53935';
-
-      var label = pct >= 70 ? 'Good quality'
-                : pct >= 40 ? 'Acceptable - may work'
-                : 'Low quality - consider retaking';
-      el('qualityText').textContent = label + ' (' + sizeKB + ' KB)';
-      el('qualityText').style.color = pct >= 70 ? '#4CAF50' : pct >= 40 ? '#FFA500' : '#e53935';
-
-      el('btnCapture').style.display  = 'none';
-      el('btnConfirm').style.display  = 'block';
-      el('btnRetake').style.display   = 'block';
-      el('btnNewSearch').style.display = 'none';
-    }
-
-    function hidePreview() {
-      el('previewSection').style.display = 'none';
-      el('btnConfirm').style.display = 'none';
-      el('btnRetake').style.display  = 'none';
-      el('btnCapture').style.display = 'block';
-    }
-
-    function resetUI() {
-      hidePreview();
-      el('results').innerHTML = '';
-      el('btnNewSearch').style.display = 'none';
-      setFb('Point glasses at a face, then press Capture');
-      setFb2('');
-      showProgress(false);
-    }
-
-    async function checkConn() {
-      try {
-        var d = await fetch('/session-status').then(function(r) { return r.json(); });
-        var s = el('connStatus');
-        s.textContent = d.connected ? 'Glasses Connected' : 'Glasses Disconnected';
-        s.style.color = d.connected ? '#4CAF50' : '#e53935';
-      } catch(e) {}
-    }
-
-    async function doCapture() {
-      var btn = el('btnCapture');
-      btn.disabled = true;
-      btn.textContent = 'Capturing...';
-      setFb('Taking photo from glasses...');
-      setFb2('');
-      el('results').innerHTML = '';
-      el('btnNewSearch').style.display = 'none';
-      hidePreview();
-      showProgress(true);
-      setProgress(15);
-
-      try {
-        var resp = await fetch('/action/capture', { method: 'POST' });
-        var d    = await resp.json();
-        showProgress(false);
-        if (d.error) {
-          setFb('Error: ' + d.error);
-        } else {
-          showPreview(d.base64, d.sizeKB, d.quality);
-          setFb('Photo ready - confirm or retake');
-        }
-      } catch(e) {
-        showProgress(false);
-        setFb('Capture failed - try again');
-      }
-
-      btn.disabled = false;
-      btn.textContent = 'Capture Photo';
-    }
-
-    async function doRetake() {
-      try { await fetch('/action/discard', { method: 'POST' }); } catch(e) {}
-      hidePreview();
-      setFb('Point glasses at a face, then press Capture');
-      setFb2('');
-    }
-
-    async function doConfirm() {
-      var btnC = el('btnConfirm');
-      var btnR = el('btnRetake');
-      btnC.disabled = true;
-      btnR.disabled = true;
-      btnC.textContent = 'Searching...';
-      setFb2('Searching the web by face... (~30s)');
-      showProgress(true);
-      setProgress(10);
-      el('results').innerHTML = '';
-
-      var ticker = setInterval(function() {
-        var cur = parseFloat(el('progressFill').style.width) || 10;
-        if (cur < 85) setProgress(cur + 2);
-      }, 1500);
-
-      try {
-        var resp = await fetch('/action/confirm', { method: 'POST' });
-        var d    = await resp.json();
-
-        clearInterval(ticker);
-        setProgress(100);
-        setTimeout(function() { showProgress(false); }, 600);
-
-        if (d.error) {
-          setFb2('Error: ' + d.error);
-          btnC.disabled = false;
-          btnR.disabled = false;
-          btnC.textContent = 'Looks Good - Search!';
-          return;
-        }
-
-        hidePreview();
-        setFb('');
-
-        if (!d.results || d.results.length === 0) {
-          setFb2('No matching faces found on the web.');
-          el('results').innerHTML = '<p class="no-results">No matches found.</p>';
-        } else {
-          setFb2(d.results.length + ' match' + (d.results.length > 1 ? 'es' : '') + ' found!');
-          renderResults(d.results);
-        }
-        el('btnNewSearch').style.display = 'block';
-
-      } catch(e) {
-        clearInterval(ticker);
-        showProgress(false);
-        setFb2('Search failed - try again');
-        btnC.disabled = false;
-        btnR.disabled = false;
-        btnC.textContent = 'Looks Good - Search!';
-      }
-    }
-
-    function renderResults(results) {
-      var c = el('results');
-      c.innerHTML = '';
-      results.forEach(function(r, i) {
-        var thumb = r.base64
-          ? '<img class="thumb" src="data:image/jpeg;base64,' + r.base64 + '" alt="match" />'
-          : '';
-        var score = Math.round(r.score);
-        c.innerHTML +=
-          '<div class="result-card">' +
-            thumb +
-            '<div class="result-title">Match #' + (i + 1) + '</div>' +
-            '<div class="row"><span class="lbl">Score</span><span class="val">' + score + ' / 100</span></div>' +
-            '<div class="score-bar" style="width:' + Math.min(score, 100) + '%"></div>' +
-            '<div class="row"><span class="lbl">URL</span><span class="val">' +
-              '<a href="' + r.url + '" target="_blank" rel="noopener">View page</a>' +
-            '</span></div>' +
-          '</div>';
-      });
-    }
-
-    setInterval(checkConn, 3000);
-    checkConn();
-  </script>
-</body>
-</html>\`);
+              setInterval(update, 3000);
+              setInterval(checkConn, 3000);
+              update();
+              checkConn();
+            </script>
+          </body>
+        </html>
+      `);
     });
 
-    // ── CAPTURE ─────────────────────────────────────────────────────────────
-    app.post('/action/capture', async (_req, res) => {
-      const session = Array.from(activeSessions.values())[0];
-      if (!session)    return res.status(503).json({ error: 'Glasses not connected' });
-      if (isCapturing) return res.status(429).json({ error: 'Capture already in progress' });
-
-      isCapturing = true;
-      console.log('[CAPTURE] Requesting photo...');
-
-      try {
-        const photo = await Promise.race([
-          (session.camera as any).requestPhoto(),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('Photo timeout after 15s')), 15000)
-          ),
-        ]);
-
-        const rawBase64 = this.extractBase64(photo);
-        if (!rawBase64) {
-          isCapturing = false;
-          return res.status(500).json({ error: 'Could not read photo data from glasses' });
-        }
-
-        const rawBuffer = Buffer.from(rawBase64, 'base64');
-        console.log(\`[CAPTURE] Raw size: \${Math.round(rawBuffer.length / 1024)} KB\`);
-
-        const enhancedBuffer = await sharp(rawBuffer)
-          .resize({ width: 640, height: 640, fit: 'inside', withoutEnlargement: false })
-          .sharpen({ sigma: 1.5 })
-          .normalise()
-          .jpeg({ quality: 92 })
-          .toBuffer();
-
-        const enhancedBase64 = enhancedBuffer.toString('base64');
-        const enhancedKB     = Math.round(enhancedBuffer.length / 1024);
-        const quality        = Math.min(100, Math.round((enhancedKB / 80) * 100));
-
-        pendingPhoto = { base64: rawBase64, enhanced: enhancedBase64, sizeKB: enhancedKB };
-
-        console.log(\`[CAPTURE] Enhanced: \${enhancedKB} KB, quality: \${quality}\`);
-        await this.safeSpeak(session, 'Photo captured. Check the app and confirm or retake.');
-
-        isCapturing = false;
-        return res.json({ base64: enhancedBase64, sizeKB: enhancedKB, quality });
-
-      } catch (err: any) {
-        console.error('[CAPTURE] Error:', err.message);
-        isCapturing = false;
-        return res.status(500).json({ error: err.message });
-      }
+    // Stats endpoint
+    app.get('/stats', (_req, res) => {
+      const state: SessionState = Array.from(sessionStates.values())[0] ?? {
+        runningCount: 0,
+        cardsSeen: 0,
+        highSeen: 0,
+        decks: 6,
+        totalHigh: 120
+      };
+      const decksLeft = Math.max(state.decks - state.cardsSeen / 52, 0.5);
+      const trueCount = Math.round(state.runningCount / decksLeft);
+      const highLeft = state.totalHigh - state.highSeen;
+      res.json({ trueCount, highLeft, cardsSeen: state.cardsSeen, runningCount: state.runningCount });
     });
 
-    // ── DISCARD ─────────────────────────────────────────────────────────────
-    app.post('/action/discard', (_req, res) => {
-      pendingPhoto = null;
-      console.log('[DISCARD] Pending photo cleared');
-      return res.json({ ok: true });
+    // Session status — lets webview know if glasses are connected
+    app.get('/session-status', (_req, res) => {
+      res.json({ connected: transcriptionHandlers.size > 0 });
     });
 
-    // ── CONFIRM ─────────────────────────────────────────────────────────────
-    app.post('/action/confirm', async (_req, res) => {
-      if (!pendingPhoto) return res.status(400).json({ error: 'No photo pending - capture one first' });
-      if (isSearching)   return res.status(429).json({ error: 'Search already in progress' });
+    // Dedicated REST endpoints for webview buttons (no voice needed)
+    const getSession = () => Array.from(activeSessions.values())[0] ?? null;
+    const getState = () => Array.from(sessionStates.values())[0] ?? null;
 
-      isSearching = true;
-      const photoToSearch = pendingPhoto;
-      pendingPhoto = null;
-      const session = Array.from(activeSessions.values())[0];
+    app.post('/action/scan', async (_req, res) => {
+      const session = getSession();
+      const state = getState();
+      if (!session || !state) return res.status(503).json({ message: 'Glasses not connected' });
+      if (isGlobalScanning) return res.status(429).json({ message: 'Scan already in progress' });
+      console.log('[ACTION] Scan triggered from webview');
+      // Run async, respond immediately so webview doesnt time out
+      this.performScan(session, state).catch(e => console.error('[ACTION] Scan error:', e));
+      res.json({ message: 'Scan started' });
+    });
 
-      console.log('[CONFIRM] Searching FaceCheck.ID...');
+    app.post('/action/stream/start', (_req, res) => {
+      const session = getSession();
+      const state = getState();
+      if (!session || !state) return res.status(503).json({ message: 'Glasses not connected' });
+      if (globalStreamingInterval) return res.json({ message: 'Already streaming' });
+      console.log('[ACTION] Stream start triggered from webview');
+      globalStreamingInterval = setInterval(async () => {
+        if (!isGlobalScanning) await this.performScan(session, state).catch(() => {});
+      }, 4000);
+      res.json({ message: 'Streaming started' });
+    });
 
-      try {
-        const results = await this.searchFace(photoToSearch.enhanced);
-        console.log(\`[CONFIRM] \${results.length} match(es) found\`);
-
-        if (session) {
-          const msg = results.length === 0
-            ? 'No matching faces found on the web.'
-            : \`Found \${results.length} match\${results.length > 1 ? 'es' : ''}. Check the app for details.\`;
-          await this.safeSpeak(session, msg);
-        }
-
-        isSearching = false;
-        return res.json({ results });
-
-      } catch (err: any) {
-        console.error('[CONFIRM] Error:', err.message);
-        isSearching = false;
-        if (session) await this.safeSpeak(session, 'Search failed. Please try again.').catch(() => {});
-        return res.status(500).json({ error: err.message });
+    app.post('/action/stream/stop', (_req, res) => {
+      if (globalStreamingInterval) {
+        clearInterval(globalStreamingInterval);
+        globalStreamingInterval = null;
       }
+      console.log('[ACTION] Stream stop triggered from webview');
+      res.json({ message: 'Streaming stopped' });
+    });
+
+    app.post('/action/new-shoe', (_req, res) => {
+      const state = getState();
+      if (state) {
+        state.runningCount = 0;
+        state.cardsSeen = 0;
+        state.highSeen = 0;
+      }
+      if (globalStreamingInterval) {
+        clearInterval(globalStreamingInterval);
+        globalStreamingInterval = null;
+      }
+      console.log('[ACTION] New shoe reset');
+      res.json({ message: 'Count reset' });
+    });
+
+    // Legacy action endpoint (kept for compatibility)
+    app.post('/action', (req, res) => {
+      const { command } = req.body;
+      console.log(`[ACTION] Legacy command: ${command}`);
+      res.json({ status: 'ok' });
     });
   }
 
-  // ── Session lifecycle ─────────────────────────────────────────────────────
+  // ─── Session Lifecycle ──────────────────────────────────────────────────────
 
-  protected async onSession(
-    session: AppSession,
-    sessionId: string,
-    _userId: string
-  ): Promise<void> {
-    console.log(\`[SESSION] Started: \${sessionId}\`);
+  protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
+    console.log(`[SESSION] Started: ${sessionId} (user: ${userId})`);
+
     activeSessions.set(sessionId, session);
+    sessionStates.set(sessionId, {
+      runningCount: 0,
+      cardsSeen: 0,
+      highSeen: 0,
+      decks: 6,
+      totalHigh: 120  // 6 decks × 20 high cards (10, J, Q, K, A × 4 suits × 6 decks)
+    });
 
-    await new Promise(r => setTimeout(r, 2000));
-    if (!activeSessions.has(sessionId)) return;
+    let streamingInterval: NodeJS.Timeout | null = null;
+    let isScanning = false;
 
-    await this.safeSpeak(session, 'Face search ready. Press capture in the app.');
+
+    // ─── Transcription Handler ──────────────────────────────────────────────
+    // IMPORTANT: Handler registered BEFORE speak() so SDK sends correct subscriptions
+
+    // Mute window: ignore transcription for N ms after we speak (prevents TTS echo)
+    let mutedUntil = 0;
+    const MUTE_DURATION_MS = 4000;
+    const speakAndMute = async (msg: string) => {
+      mutedUntil = Date.now() + MUTE_DURATION_MS;
+      try {
+        await Promise.race([
+          session.audio.speak(msg),
+          new Promise<void>((_, reject) => setTimeout(() => reject(new Error('speak timeout')), 5000))
+        ]);
+      } catch (e: any) {
+        console.warn('[SPEAK] Timed out or failed:', e.message);
+      }
+    };
+
+    const onTrans = async (data: any) => {
+      // Only act on final transcription results, not partials
+      if (data?.isFinal === false) return;
+
+      const text: string = (data?.text ?? '').toLowerCase().trim();
+      if (!text) return;
+
+      // Ignore if we're in the mute window (glasses echoing our own TTS)
+      if (Date.now() < mutedUntil) {
+        console.log(`[TRANS] Muted (TTS echo): "${text}"`);
+        return;
+      }
+
+      console.log(`[TRANS] "${text}"`);
+
+      const state = sessionStates.get(sessionId);
+      if (!state) return;
+
+      if (text.includes('scan cards')) {
+        await this.performScan(session, state);
+        mutedUntil = Date.now() + 8000; // scan TTS can be long
+
+      } else if (text.includes('start streaming')) {
+        if (streamingInterval) {
+          await speakAndMute('Already streaming.');
+          return;
+        }
+        await speakAndMute('Streaming started.');
+        streamingInterval = setInterval(async () => {
+          if (!isScanning) { await this.performScan(session, state); mutedUntil = Date.now() + 8000; }
+        }, 3000);
+
+      } else if (text.includes('stop streaming')) {
+        if (streamingInterval) {
+          clearInterval(streamingInterval);
+          streamingInterval = null;
+          await speakAndMute('Streaming stopped.');
+        } else {
+          await speakAndMute('Not currently streaming.');
+        }
+
+      } else if (text.includes('new shoe')) {
+        state.runningCount = 0;
+        state.cardsSeen = 0;
+        state.highSeen = 0;
+        await speakAndMute('New shoe started. Count reset.');
+
+      } else if (text.includes('status')) {
+        const decksLeft = Math.max(state.decks - state.cardsSeen / 52, 0.5);
+        const trueCount = Math.round(state.runningCount / decksLeft);
+        const highLeft = state.totalHigh - state.highSeen;
+        await speakAndMute(
+          `Running count ${state.runningCount}. True count ${trueCount}. High cards left: ${highLeft}. Cards seen: ${state.cardsSeen}.`
+        );
+
+      } else {
+        console.log(`[TRANS] Unrecognized: "${text}"`);
+      }
+    };
+
+
+    // CRITICAL FIX: Register BEFORE speak so SDK sends transcription subscription
+    session.events.onTranscription(onTrans);
+    transcriptionHandlers.set(sessionId, onTrans);
+    console.log(`[SESSION] Handler registered for ${sessionId}`);
+
+    // Wait for session to stabilize (switching_clouds causes rapid reconnects)
+    // We wait longer to let Mentra settle on one cloud region
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Only speak if this session is still the active one
+    const currentState = sessionStates.get(sessionId);
+    if (!currentState) {
+      console.log(`[SESSION] ${sessionId} was replaced before stabilization, skipping speak`);
+      return;
+    }
+
+    mutedUntil = Date.now() + MUTE_DURATION_MS;
+    try {
+      await Promise.race([
+        session.audio.speak('Card counter ready.'),
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('speak timeout')), 5000))
+      ]);
+    } catch (e: any) {
+      console.warn('[SPEAK] Ready message failed:', e.message);
+    }
+
+
+    // Fire any command that was queued before the session was ready
+    if (pendingCommand) {
+      const cmd = pendingCommand;
+      pendingCommand = null;
+      console.log(`[SESSION] Executing queued command: "${cmd}"`);
+      setTimeout(() => onTrans({ text: cmd }), 500);
+    }
+
+    // ─── Cleanup ────────────────────────────────────────────────────────────
 
     const cleanup = () => {
+      if (streamingInterval) {
+        clearInterval(streamingInterval);
+        streamingInterval = null;
+      }
+      sessionStates.delete(sessionId);
+      transcriptionHandlers.delete(sessionId);
       activeSessions.delete(sessionId);
-      console.log(\`[SESSION] Ended: \${sessionId}\`);
+      console.log(`[SESSION] Cleaned up: ${sessionId}`);
     };
 
     if (typeof (session as any).onEnd === 'function') {
@@ -415,114 +410,238 @@ class FaceAnalyzerApp extends AppServer {
     }
   }
 
-  // ── FaceCheck.ID API ──────────────────────────────────────────────────────
+  // ─── Scan Logic ─────────────────────────────────────────────────────────────
 
-  private async searchFace(imageBase64: string): Promise<any[]> {
-    const apiToken = process.env.FACECHECK_API_TOKEN;
-    if (!apiToken) throw new Error('FACECHECK_API_TOKEN not set');
-
-    const site    = 'https://facecheck.id';
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      Authorization: apiToken,
-    };
-
-    const buffer   = Buffer.from(imageBase64, 'base64');
-    const blob     = new Blob([buffer], { type: 'image/jpeg' });
-    const formData = new FormData();
-    formData.append('images', blob, 'photo.jpg');
-    formData.append('id_search', '');
-
-    const uploadResp = await fetch(\`\${site}/api/upload_pic\`, {
-      method: 'POST',
-      headers,
-      body: formData,
-    });
-
-    const uploadData = await uploadResp.json() as any;
-    if (uploadData.error) {
-      throw new Error(\`FaceCheck upload error: \${uploadData.error} (\${uploadData.code})\`);
+  private async performScan(session: AppSession, state: SessionState): Promise<void> {
+    if (isGlobalScanning) { console.log('[SCAN] Already scanning, skipping'); return; }
+    isGlobalScanning = true;
+    console.log('[SCAN] Starting...');
+    try {
+      await this._performScanInner(session, state);
+    } finally {
+      isGlobalScanning = false;
     }
-
-    const id_search = uploadData.id_search;
-    console.log('[FACECHECK] Uploaded, id_search:', id_search);
-
-    for (let attempt = 0; attempt < 30; attempt++) {
-      await new Promise(r => setTimeout(r, 2000));
-
-      const searchResp = await fetch(\`\${site}/api/search\`, {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id_search, with_progress: true, status_only: false, demo: false }),
-      });
-
-      const searchData = await searchResp.json() as any;
-      if (searchData.error) throw new Error(\`FaceCheck search error: \${searchData.error}\`);
-
-      console.log(\`[FACECHECK] Progress: \${searchData.progress ?? 0}%\`);
-
-      if (searchData.output?.items) {
-        return searchData.output.items.map((item: any) => ({
-          score: item.score,
-          url:   item.url,
-          base64: item.base64 ?? null,
-        }));
-      }
-    }
-
-    throw new Error('FaceCheck search timed out after 60 seconds');
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  private async _performScanInner(session: AppSession, state: SessionState): Promise<void> {
 
-  private extractBase64(photo: any): string | null {
+    // Never let a speak() hang — if it times out, just log and continue
+    const safeSpeak = async (msg: string) => {
+      try {
+        await Promise.race([
+          safeSpeak(msg),
+          new Promise<void>((_, reject) => setTimeout(() => reject(new Error('speak timeout')), 5000))
+        ]);
+      } catch (e: any) {
+        console.warn('[SPEAK] Timed out or failed:', e.message);
+      }
+    };
+
+    // Take a single photo
+    let frames: string[] = [];
+    try {
+      frames = await this.captureMultipleFrames(session, 1);
+    } catch (err: any) {
+      console.error('[SCAN] Capture failed:', err.message);
+      await safeSpeak('Camera error. Please retry.');
+      return;
+    }
+
+    if (frames.length === 0) {
+      await safeSpeak('No photo captured. Please retry.');
+      return;
+    }
+
+    // Detect cards via Claude Vision
+    let detectedCards: DetectedCard[] = [];
+    try {
+      detectedCards = await this.detectCards(frames[0]);
+      console.log(`[SCAN] Cards detected: ${detectedCards.length}`);
+    } catch (err: any) {
+      console.error('[SCAN] detectCards threw:', err.message);
+      await safeSpeak('Detection error. Please retry.');
+      return;
+    }
+
+    // Update state and announce
+    if (detectedCards.length === 0) {
+      const decksLeft = Math.max(state.decks - state.cardsSeen / 52, 0.5);
+      const trueCount = Math.round(state.runningCount / decksLeft);
+      await safeSpeak(`No cards detected. True count: ${trueCount}.`);
+    } else {
+      for (const card of detectedCards) {
+        state.runningCount += this.getCardValue(card.rank);
+        state.cardsSeen++;
+        if (['10', 'J', 'Q', 'K', 'A'].includes(card.rank)) state.highSeen++;
+      }
+      const newDecksLeft = Math.max(state.decks - state.cardsSeen / 52, 0.5);
+      const trueCount = Math.round(state.runningCount / newDecksLeft);
+      const highLeft = state.totalHigh - state.highSeen;
+      await safeSpeak(
+        `Detected ${detectedCards.length} card${detectedCards.length > 1 ? 's' : ''}. Running: ${state.runningCount}. True: ${trueCount}. High left: ${highLeft}.`
+      );
+    }
+  }
+
+  // ─── Multi-shot capture: take 3 photos, merge & deduplicate results ──────────
+
+  private async captureMultipleFrames(session: AppSession, count: number): Promise<string[]> {
+    const frames: string[] = [];
+    for (let i = 0; i < count; i++) {
+      try {
+        const photo = await Promise.race([
+          (session.camera as any).requestPhoto(),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('photo timeout')), 12000))
+        ]);
+        const b64 = this.extractBase64FromPhoto(photo);
+        if (b64) {
+          frames.push(b64);
+          console.log(`[SCAN] Frame ${i + 1}/${count} captured, length: ${b64.length}`);
+        }
+      } catch (e: any) {
+        console.warn(`[SCAN] Frame ${i + 1} failed:`, e.message);
+      }
+      // Small delay between shots so glasses can reframe slightly
+      if (i < count - 1) await new Promise(r => setTimeout(r, 800));
+    }
+    return frames;
+  }
+
+  private extractBase64FromPhoto(photo: any): string | null {
     if (!photo) return null;
-    if (Buffer.isBuffer(photo) || photo instanceof Uint8Array) {
-      return Buffer.from(photo).toString('base64');
-    }
-    if (typeof photo === 'string') {
-      return photo.startsWith('data:') ? photo.split(',')[1] : photo;
-    }
-    for (const key of ['buffer', 'jpegData', 'data', 'bytes', 'base64', 'photoData', 'image']) {
-      const val = photo[key];
+    if (Buffer.isBuffer(photo) || photo instanceof Uint8Array) return Buffer.from(photo).toString('base64');
+    if (typeof photo === 'string') return photo.startsWith('data:') ? photo.split(',')[1] : photo;
+    const keys = ['buffer', 'jpegData', 'data', 'bytes', 'base64', 'photoData', 'image'];
+    for (const k of keys) {
+      const val = photo[k];
       if (!val) continue;
-      if (Buffer.isBuffer(val) || val instanceof Uint8Array) {
-        return Buffer.from(val).toString('base64');
-      }
-      if (typeof val === 'string') {
-        return val.startsWith('data:') ? val.split(',')[1] : val;
-      }
+      if (Buffer.isBuffer(val) || val instanceof Uint8Array) return Buffer.from(val).toString('base64');
+      if (typeof val === 'string') return val.startsWith('data:') ? val.split(',')[1] : val;
     }
     return null;
   }
 
-  private async safeSpeak(session: AppSession, msg: string): Promise<void> {
-    try {
-      await Promise.race([
-        session.audio.speak(msg),
-        new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error('speak timeout')), 5000)
-        ),
-      ]);
-    } catch (e: any) {
-      console.warn('[SPEAK] Failed:', e.message);
+  // ─── Claude Vision Card Detection ──────────────────────────────────────────
+
+  private async detectCards(imageBase64: string): Promise<DetectedCard[]> {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) { console.error('[CLAUDE] No API key'); return []; }
+
+    console.log('[CLAUDE] Sending image, base64 length:', imageBase64.length);
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-opus-4-6',
+        max_tokens: 2048,
+        system: `You are an expert playing card identifier with perfect vision. You specialize in reading playing cards from photos taken at various angles and qualities. You are extremely careful about distinguishing similar-looking cards:
+- 9 vs 6: count the pips carefully
+- 4 vs A: look at the corner index
+- Q vs 0/10: letters vs numbers
+- Suit colors: red = hearts/diamonds, black = spades/clubs
+- Diamond ♦ vs Heart ♥: diamond is a sharp rhombus, heart has a curved top
+You never guess — you only report cards you can actually identify. If a card is too blurry or obscured to identify both rank AND suit with confidence, skip it.`,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 } },
+            { type: 'text', text: `Look at this photo carefully and identify every playing card you can see.
+
+Step 1: Count how many cards are visible (including partially covered ones).
+Step 2: For each card, read the rank and suit from the corner index (the small number/letter and suit symbol in the corner).
+Step 3: Double-check each card — especially 9 vs 6 (rotate if needed), and red suits (heart vs diamond).
+
+IMPORTANT RULES:
+- Read the corner index (top-left or bottom-right of each card) — that's the most reliable
+- A card showing "9" with red pips is NINE, not TEN
+- A card showing "5" is FIVE, not SIX
+- Hearts (♥) have a curved top split; Diamonds (♦) are pointy rhombuses
+- Only include cards where you are confident of BOTH rank AND suit
+
+Respond with ONLY this JSON (no explanation, no markdown):
+{"cards": [{"rank": "A", "suit": "spades"}, {"rank": "9", "suit": "hearts"}]}
+If no cards visible: {"cards": []}` }
+          ]
+        }]
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('[CLAUDE] API error:', response.status, errText);
+      throw new Error(`Claude API returned ${response.status}: ${errText}`);
     }
+
+    const data = await response.json();
+    const text = (data.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
+    console.log('[CLAUDE] Response:', text);
+
+    const clean = text.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    const cards: DetectedCard[] = (parsed.cards ?? []).filter(
+      (c: any) => typeof c.rank === 'string' && typeof c.suit === 'string'
+    );
+    console.log('[CLAUDE] Parsed cards:', JSON.stringify(cards));
+    return cards;
+  }
+
+  // ─── Deduplicate cards across multiple scan results ───────────────────────
+
+  private mergeCardResults(allResults: DetectedCard[][]): DetectedCard[] {
+    // Use the result with the most cards as the base, then add any unique cards from others
+    if (allResults.length === 0) return [];
+    
+    // Sort by card count descending — most complete scan first
+    const sorted = [...allResults].sort((a, b) => b.length - a.length);
+    const merged: DetectedCard[] = [...sorted[0]];
+
+    for (let i = 1; i < sorted.length; i++) {
+      for (const card of sorted[i]) {
+        // Add card only if this exact rank+suit combo isn't already in merged
+        const isDuplicate = merged.some(c => c.rank === card.rank && c.suit === card.suit);
+        if (!isDuplicate) {
+          merged.push(card);
+          console.log(`[MERGE] Added from scan ${i + 1}: ${card.rank} of ${card.suit}`);
+        }
+      }
+    }
+
+    console.log(`[MERGE] Final: ${merged.length} cards from ${allResults.map(r => r.length).join('+')} across ${allResults.length} shots`);
+    return merged;
+  }
+
+  // ─── Hi-Lo Card Value ───────────────────────────────────────────────────────
+
+  private getCardValue(rank: string): number {
+    if (['2', '3', '4', '5', '6'].includes(rank)) return 1;   // low  → count up
+    if (['7', '8', '9'].includes(rank)) return 0;              // neutral
+    return -1;                                                  // 10, J, Q, K, A → count down
   }
 }
 
-// ── Bootstrap ─────────────────────────────────────────────────────────────────
+// ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 const port = Number(process.env.PORT) || 8080;
 
-const server = new FaceAnalyzerApp({
-  packageName: 'com.yakov.picture.detector',
+const server = new CardCounterApp({
+  packageName: 'com.yakov.cardcounter',
   apiKey: process.env.MENTRA_API_KEY!,
   port,
   host: '0.0.0.0',
-  requiredPermissions: ['camera'],
-  webviewURL: 'https://mentra-picture-detector-production.up.railway.app/webview',
+  // Tell the SDK we need transcription before session starts
+  // so it sends the correct subscriptions at CONNECTION_ACK time
+  requiredPermissions: ['microphone'],
+  subscriptions: ['transcription'],
 });
 
 server.start()
-  .then(() => console.log(\`Face Search running on port \${port}\`))
-  .catch(err => { console.error('Failed to start:', err); process.exit(1); });
+  .then(() => console.log(`✅ Card Counter running on port ${port}`))
+  .catch(err => {
+    console.error('❌ Failed to start server:', err);
+    process.exit(1);
+  });
