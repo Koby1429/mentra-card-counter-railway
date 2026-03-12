@@ -527,7 +527,7 @@ class CardCounterApp extends AppServer {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) { console.error('[CLAUDE] No API key'); return []; }
 
-    console.log('[CLAUDE] Sending image, base64 length:', imageBase64.length);
+    console.log('[CLAUDE] Sending image, base64 length:', imageBase64.length, '| approx size:', Math.round(imageBase64.length * 0.75 / 1024), 'KB');
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -537,35 +537,19 @@ class CardCounterApp extends AppServer {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 256,
-        system: `You are an expert playing card identifier with perfect vision. You specialize in reading playing cards from photos taken at various angles and qualities. You are extremely careful about distinguishing similar-looking cards:
-- 9 vs 6: count the pips carefully
-- 4 vs A: look at the corner index
-- Q vs 0/10: letters vs numbers
-- Suit colors: red = hearts/diamonds, black = spades/clubs
-- Diamond ♦ vs Heart ♥: diamond is a sharp rhombus, heart has a curved top
-You never guess — you only report cards you can actually identify. If a card is too blurry or obscured to identify both rank AND suit with confidence, skip it.`,
+        model: 'claude-opus-4-6',
+        max_tokens: 512,
+        system: `You are a playing card identifier. Be precise. Only report cards you can clearly see.`,
         messages: [{
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 } },
-            { type: 'text', text: `Look at this photo carefully and identify every playing card you can see.
-
-Step 1: Count how many cards are visible (including partially covered ones).
-Step 2: For each card, read the rank and suit from the corner index (the small number/letter and suit symbol in the corner).
-Step 3: Double-check each card — especially 9 vs 6 (rotate if needed), and red suits (heart vs diamond).
-
-IMPORTANT RULES:
-- Read the corner index (top-left or bottom-right of each card) — that's the most reliable
-- A card showing "9" with red pips is NINE, not TEN
-- A card showing "5" is FIVE, not SIX
-- Hearts (♥) have a curved top split; Diamonds (♦) are pointy rhombuses
-- Only include cards where you are confident of BOTH rank AND suit
-
-Respond with ONLY this JSON (no explanation, no markdown):
-{"cards": [{"rank": "A", "suit": "spades"}, {"rank": "9", "suit": "hearts"}]}
-If no cards visible: {"cards": []}` }
+            { type: 'text', text: `List every playing card visible. Read the corner index (rank + suit symbol in card corner).
+Ranks: A 2 3 4 5 6 7 8 9 10 J Q K
+Suits: spades hearts diamonds clubs
+Only include cards you can clearly identify both rank AND suit.
+Reply ONLY with JSON: {"cards":[{"rank":"A","suit":"spades"}]}
+No cards visible: {"cards":[]}` }
           ]
         }]
       })
